@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f6f5e"/>
+      <stop offset="1" stop-color="#1b4438"/>
+    </linearGradient>
+    <linearGradient id="door" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f1a17"/>
+      <stop offset="1" stop-color="#16241f"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <!-- hangar: arched roof over an open door -->
+  <path d="M232 720 V520 A280 230 0 0 1 792 520 V720 Z" fill="#e6efe9"/>
+  <path d="M312 720 V548 A200 160 0 0 1 712 548 V720 Z" fill="url(#door)"/>
+  <rect x="200" y="716" width="624" height="34" rx="17" fill="#e6efe9"/>
+  <!-- the parked session: a terminal prompt waiting inside -->
+  <path d="M392 586 L452 630 L392 674" fill="none" stroke="#6cc4a6" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="482" y="658" width="120" height="30" rx="15" fill="#6cc4a6"/>
+</svg>

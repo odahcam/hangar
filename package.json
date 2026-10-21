@@ -1,0 +1,15 @@
+{
+  "name": "hangar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Catalog, prioritize and resume your Claude Code sessions on macOS.",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node --no-warnings server/server.js",
+    "build": "scripts/build.sh"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.0",
+    "postject": "1.0.0-alpha.6"
+  }
+}

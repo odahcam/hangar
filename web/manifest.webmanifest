@@ -1,0 +1,13 @@
+{
+  "name": "Hangar",
+  "short_name": "Hangar",
+  "description": "Sessões do Claude Code estacionadas para retomar",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#141715",
+  "theme_color": "#2f6f5e",
+  "icons": [
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
