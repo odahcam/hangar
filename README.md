@@ -16,9 +16,13 @@ Every session shows up on its own. You mark what to resume, set the order, write
 
 <img src="docs/images/gatekeeper-blocked.png" width="300" alt="macOS dialog: “Hangar” Not Opened">
 
-Then open **System Settings → Privacy & Security**, scroll down to **Security**, and click **Open Anyway** next to the Hangar message. Confirm with your password or Touch ID.
+Then open **System Settings → Privacy & Security**, scroll down to **Security**, and click **Open Anyway** next to the Hangar message.
 
 <img src="docs/images/open-anyway.png" width="484" alt="Privacy & Security settings with the Open Anyway button">
+
+macOS asks one last time. Click **Open Anyway** again and confirm with your password or Touch ID.
+
+<img src="docs/images/open-anyway-confirm.png" width="300" alt="macOS dialog: Open “Hangar”? with the Open Anyway button">
 
 You only do this once. From then on Hangar opens like any other app.
 
