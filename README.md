@@ -15,9 +15,21 @@ Hangar reads `~/.claude` directly. Every session shows up on its own; you set it
 
 ## Requirements
 
-- macOS 13 or later
+- macOS 13 or later, Apple Silicon
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI (`claude`)
 - To build: Node.js ≥ 22.5 and Xcode command line tools (`swiftc`)
+
+## Install
+
+Download `Hangar.zip` from [Releases](../../releases), unzip it and move `Hangar.app` to `/Applications`.
+
+The app is not notarized by Apple, so macOS blocks the first launch. Either run
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Hangar.app
+```
+
+or open it once, then allow it in **System Settings → Privacy & Security → Open Anyway**.
 
 ## Build
 
@@ -27,7 +39,7 @@ npm run build
 open build/Hangar.app
 ```
 
-Move `build/Hangar.app` to `/Applications` to keep it. The build is ad-hoc signed: on another Mac, open it the first time with right-click → Open. **Hangar → Open at Login** starts it with your session.
+Move `build/Hangar.app` to `/Applications` to keep it. **Hangar → Open at Login** starts it with your session.
 
 To run only the server during development: `npm start`, then open the URL printed on stderr.
 
@@ -43,3 +55,7 @@ Claude Code deletes transcripts after 30 days by default. To keep them longer, s
 
 - Terminal.app only (no iTerm2, Ghostty, etc.).
 - The first time Hangar controls Terminal, macOS asks for Automation permission.
+
+## License
+
+Source-available, not open source. You may use Hangar and modify it for personal use; you may not redistribute it or modified versions, paid or free. Contributions through pull requests are welcome. See [LICENSE](LICENSE).
