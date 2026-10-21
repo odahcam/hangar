@@ -1,37 +1,65 @@
-# Hangar
+<h1><img src="web/icon.svg" width="40" align="top" alt=""> Hangar</h1>
 
-A macOS app to catalog, prioritize and resume your Claude Code sessions, so you can close the ones you are not working on without losing track of them.
+Keep track of your Claude Code sessions, so you can close the ones you're not using without losing them.
 
-Hangar reads `~/.claude` directly. Every session shows up on its own; you set its status (to resume, in progress, done), its priority and a note. Resuming opens a Terminal tab with `claude --resume <id>`.
+Every session shows up on its own. You mark what to resume, set the order, write a note about where you stopped, and get back to any session with one click.
 
-## Features
-
-- **Pending / Done lists** of every session in `~/.claude/projects`, with drag-to-reorder priority, notes, and the Terminal tab of the sessions that are open.
-- **Resume / go to tab / close**: drives Terminal.app to resume a closed session, focus an open one, or close it.
-- **Transcript backup**: transcripts of pending sessions are copied to `~/Library/Application Support/Hangar/transcripts/`, so Claude Code's cleanup (`cleanupPeriodDays`) cannot delete them. Resume restores the copy if the original is gone.
-- **Done detection**: sessions closed for 1h+ are checked by Claude Haiku (through your `claude` CLI). A "done" verdict is shown as a suggestion you confirm or dismiss; at confidence ≥ 0.90 with a verbatim quote of one of your messages, the session is marked done on its own (one click reopens it).
-- **Insights**: RAM held by each open session, pending sessions by project and age, prompts per day, new vs. done per week, longest and costliest sessions, storage, idle Terminal tabs.
-- **English and Portuguese** UI.
-
-## Requirements
-
-- macOS 13 or later, Apple Silicon
-- [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI (`claude`)
-- To build: Node.js ≥ 22.5 and Xcode command line tools (`swiftc`)
+<img src="docs/images/pending.png" alt="Hangar showing pending sessions with status, priority, notes and a done suggestion">
 
 ## Install
 
-Download `Hangar.zip` from [Releases](../../releases), unzip it and move `Hangar.app` to `/Applications`.
+**1. Download.** Get **Hangar.zip** from the [latest release](../../releases/latest).
 
-The app is not notarized by Apple, so macOS blocks the first launch. Either run
+**2. Move to Applications.** Double-click the zip, then drag **Hangar.app** into your **Applications** folder.
 
-```sh
-xattr -dr com.apple.quarantine /Applications/Hangar.app
-```
+**3. Open it the first time.** Hangar isn't from the App Store, so macOS stops the first launch with this message. Click **Done**.
 
-or open it once, then allow it in **System Settings → Privacy & Security → Open Anyway**.
+<img src="docs/images/gatekeeper-blocked.png" width="300" alt="macOS dialog: “Hangar” Not Opened">
 
-## Build
+Then open **System Settings → Privacy & Security**, scroll down to **Security**, and click **Open Anyway** next to the Hangar message. Confirm with your password or Touch ID.
+
+<img src="docs/images/open-anyway.png" width="484" alt="Privacy & Security settings with the Open Anyway button">
+
+You only do this once. From then on Hangar opens like any other app.
+
+> **Prefer the Terminal?** This does the same as step 3:
+> ```sh
+> xattr -dr com.apple.quarantine /Applications/Hangar.app
+> ```
+
+**4. Start it with your Mac (optional).** In the menu bar, choose **Hangar → Open at Login**.
+
+The first time you click **Resume**, macOS asks whether Hangar may control Terminal. Click **Allow**, since that's how it opens your sessions.
+
+### What you need
+
+- A Mac with Apple Silicon, macOS 13 or later
+- [Claude Code](https://docs.claude.com/en/docs/claude-code) installed (the `claude` command)
+
+## What it does
+
+- **Pending and Done lists** with every session in `~/.claude`: status (to resume, in progress, done), drag-to-reorder priority, notes, and which ones are open right now.
+- **Resume, go to tab, close**: opens a closed session in a new Terminal tab, jumps to the tab of an open one, or closes it.
+- **Transcript backup**: copies the transcripts of pending sessions to `~/Library/Application Support/Hangar/transcripts/`, so Claude Code's automatic cleanup can't delete them.
+- **Done detection**: once a session has been closed for an hour, Claude Haiku reads its last messages. If it looks finished, you get a suggestion to confirm or dismiss. When it is at least 90% sure and can quote you saying so, it marks the session done by itself, and one click reopens it.
+- **Insights**: how much RAM each open session holds, what's pending per project and for how long, prompts per day, longest and costliest sessions.
+- **English and Portuguese**.
+
+<img src="docs/images/insights.png" alt="Insights: prompts per day, new vs. done per week, longest sessions">
+
+## Data and privacy
+
+- Everything stays on your Mac: state and notes in `~/Library/Application Support/Hangar/`, logs in `~/Library/Logs/Hangar/`. Hangar only listens on `127.0.0.1`.
+- Done detection sends the last ~24 messages of a closed session to Claude Haiku through your own `claude` CLI, billed to your Claude account (fractions of a cent per session).
+- Claude Code deletes transcripts after 30 days by default. To keep them longer, set `"cleanupPeriodDays"` in `~/.claude/settings.json`.
+
+## Limitations
+
+- Terminal.app only (no iTerm2, Ghostty, etc.).
+
+## Build from source
+
+Needs Node.js ≥ 22.5 and the Xcode command line tools.
 
 ```sh
 npm install
@@ -39,22 +67,7 @@ npm run build
 open build/Hangar.app
 ```
 
-Move `build/Hangar.app` to `/Applications` to keep it. **Hangar → Open at Login** starts it with your session.
-
-To run only the server during development: `npm start`, then open the URL printed on stderr.
-
-## Data and privacy
-
-- State (status, priority, notes) and caches: `~/Library/Application Support/Hangar/state.db`
-- Server log: `~/Library/Logs/Hangar/server.log`
-- Done detection sends the last ~24 messages of a closed session to Claude Haiku via `claude -p`, billed to your Claude account. Nothing else leaves your machine. The server listens on `127.0.0.1` only.
-
-Claude Code deletes transcripts after 30 days by default. To keep them longer, set `"cleanupPeriodDays"` in `~/.claude/settings.json`.
-
-## Limitations
-
-- Terminal.app only (no iTerm2, Ghostty, etc.).
-- The first time Hangar controls Terminal, macOS asks for Automation permission.
+`npm start` runs only the server; open the URL it prints.
 
 ## License
 
