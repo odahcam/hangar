@@ -107,6 +107,8 @@ async function startServer(w, env = {}) {
       ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],
+    // Own process group, so stop() also takes down fake binaries the server spawned for in-flight requests.
+    detached: true,
   });
   let stderr = "";
   proc.stderr.on("data", (d) => { stderr += d; });
@@ -136,8 +138,9 @@ async function startServer(w, env = {}) {
   const session = async (id) => (await sessions()).find((s) => s.id === id);
   async function stop() {
     proc.removeAllListeners("exit");
-    proc.kill();
-    await new Promise((r) => proc.once("exit", r));
+    const exited = new Promise((r) => proc.once("exit", r));
+    try { process.kill(-proc.pid, "SIGKILL"); } catch {}
+    await exited;
   }
   return { port, base, api, sessions, session, stop, stderr: () => stderr };
 }

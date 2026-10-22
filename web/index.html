@@ -11,14 +11,17 @@
 <style>
 :root {
   --bg: #f3f4f1; --surface: #fff; --fg: #1c1f1d; --muted: #6a706b; --line: #dfe2dc;
-  --accent: #2f6f5e; --accent-soft: #e2efe9; --doing: #b7791f; --doing-soft: #fbf1df; --live: #2b7bd6; --danger: #b3412f;
+  --accent: #2f6f5e; --accent-soft: #e2efe9; --live: #2b7bd6; --danger: #b3412f;
+  /* status: a stopped session ("to resume") needs attention; one in progress is just marked, neutrally */
+  --attention: #b7791f; --attention-soft: #fbf1df; --progress: #5b6b7a; --progress-soft: #e8ecf0;
   --sans: -apple-system, "SF Pro Text", system-ui, sans-serif; --mono: "SF Mono", ui-monospace, Menlo, monospace;
   /* chart series (validated: light vs #fff, dark vs #1c201e) and an age ramp, recent → stale */
   --s1: #14866a; --s2: #2b6fd6; --age1: #b9e3d3; --age2: #6cc4a6; --age3: #14866a; --age4: #0b4f3e;
 }
 @media (prefers-color-scheme: dark) { :root {
   --bg: #141715; --surface: #1c201e; --fg: #e6e9e5; --muted: #949b95; --line: #2c312e;
-  --accent: #6cc4a6; --accent-soft: #1f3530; --doing: #e8b25a; --doing-soft: #3a2f1c; --live: #6aa8f0; --danger: #e07a68;
+  --accent: #6cc4a6; --accent-soft: #1f3530; --live: #6aa8f0; --danger: #e07a68;
+  --attention: #e8b25a; --attention-soft: #3a2f1c; --progress: #9aa8b5; --progress-soft: #262c31;
   --s1: #25a07f; --s2: #4f8fe6; --age1: #1f4a3d; --age2: #2f7a62; --age3: #4fb592; --age4: #9fe3c9; color-scheme: dark } }
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); }
@@ -35,7 +38,8 @@ nav button[aria-pressed=true] { background: var(--fg); color: var(--bg); border-
 .toolbar input { flex: 1 1 220px; min-width: 0; }
 ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 li { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; padding: 10px 12px; align-items: start; }
-li.doing { border-left: 3px solid var(--doing); }
+li.todo { border-left: 3px solid var(--attention); }
+li.doing { border-left: 3px solid var(--progress); }
 li.done { opacity: .6; }
 li.over { outline: 2px dashed var(--accent); outline-offset: 2px; }
 .rank { font: 500 12px var(--mono); color: var(--muted); text-align: center; padding-top: 2px; cursor: grab; user-select: none; }
@@ -52,8 +56,8 @@ textarea { width: 100%; box-sizing: border-box; font: 13px var(--sans); color: v
 .side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .status { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .status button { font: 500 12px var(--sans); border: 0; background: transparent; color: var(--muted); padding: 4px 8px; cursor: pointer; }
-.status button[aria-pressed=true][data-s=todo] { background: var(--accent-soft); color: var(--accent); }
-.status button[aria-pressed=true][data-s=doing] { background: var(--doing-soft); color: var(--doing); }
+.status button[aria-pressed=true][data-s=todo] { background: var(--attention-soft); color: var(--attention); }
+.status button[aria-pressed=true][data-s=doing] { background: var(--progress-soft); color: var(--progress); }
 .status button[aria-pressed=true][data-s=done] { background: var(--line); color: var(--fg); }
 .btns { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .btn { font: 12px var(--sans); border: 1px solid var(--line); background: var(--surface); color: var(--fg); border-radius: 6px; padding: 4px 8px; cursor: pointer; }

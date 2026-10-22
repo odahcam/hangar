@@ -52,7 +52,12 @@ test("the arrows reorder sessions", async ({ page }) => {
 });
 
 test("dragging a row onto another places it before that row", async ({ page }) => {
-  await rowOf(page, "Blog migration").dragTo(rowOf(page, "Rate limiter"));
+  // Step by step (two hovers so the target sees dragover) instead of dragTo, which is flaky for HTML5 drag under load.
+  await rowOf(page, "Blog migration").locator(".rank").hover();
+  await page.mouse.down();
+  await rowOf(page, "Rate limiter").hover();
+  await rowOf(page, "Rate limiter").hover({ position: { x: 20, y: 20 } });
+  await page.mouse.up();
   await expect(page.locator("#list li .title").first()).toHaveText("Blog migration");
 });
 
@@ -89,6 +94,26 @@ test("switching to Portuguese translates the page and is remembered", async ({ p
   await page.reload();
   await expect(page.locator("#tabs button").first()).toHaveText("Pendentes");
   await expect(page.locator("#counts")).toContainText("pendentes");
+});
+
+test("stopped sessions are flagged for attention; sessions in progress get a neutral mark", async ({ page }) => {
+  await rowOf(page, "Checkout redesign").getByRole("button", { name: "In progress" }).click();
+  const doing = rowOf(page, "Checkout redesign"), todo = rowOf(page, "Rate limiter");
+  await expect(doing).toHaveClass(/\bdoing\b/);
+  const token = (name) => page.evaluate((n) => {
+    const probe = document.createElement("i");
+    probe.style.color = `var(${n})`;
+    document.body.append(probe);
+    const c = getComputedStyle(probe).color;
+    probe.remove();
+    return c;
+  }, name);
+  const css = (loc, prop) => loc.evaluate((el, p) => getComputedStyle(el)[p], prop);
+  const [attention, progress] = [await token("--attention"), await token("--progress")];
+  expect(await css(todo, "borderLeftColor")).toBe(attention);
+  expect(await css(doing, "borderLeftColor")).toBe(progress);
+  expect(await css(todo.locator('[data-s="todo"]'), "color")).toBe(attention);
+  expect(await css(doing.locator('[data-s="doing"]'), "color")).toBe(progress);
 });
 
 test("the Insights tab shows its panels", async ({ page }) => {
