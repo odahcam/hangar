@@ -142,6 +142,34 @@ async function api(method, path, body) {
   return j;
 }
 async function act(fn, ok) { try { await fn(); if (ok) toast(ok); } catch (e) { toast(t("failed", { msg: e.message })); } await load(); }
+
+// Edits apply to the local list and render at once; the request runs behind. A refused request reloads the
+// server's state (rolling the edit back). Once no request is in flight, a quiet reload picks up derived fields.
+let inFlight = 0, syncTimer;
+async function mutate(apply, request, { ok, rerender = true } = {}) {
+  apply();
+  if (rerender) render();
+  refreshTiles();
+  inFlight++;
+  try {
+    await request();
+    if (ok) toast(ok);
+  } catch (e) {
+    toast(t("failed", { msg: e.message }));
+    inFlight--;
+    return load();
+  }
+  inFlight--;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => { if (!inFlight && !dragId) load(); }, 800);
+}
+const byId = (id) => items.find((s) => s.id === id);
+function setStatus(s, status, via) {
+  s.status = status;
+  s.doneAt = status === "done" ? new Date().toISOString() : null;
+  s.doneBy = status === "done" ? via || "user" : null;
+  if (status === "done") s.suggestion = null;
+}
 function toast(m) { const el = $("#toast"); el.textContent = m; el.hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => el.hidden = true, 2200); }
 function ago(iso) {
   if (!iso) return "—";
@@ -190,7 +218,7 @@ function row(s, rank) {
   const side = [];
   side.push(el("div", { class: "status", role: "group", "aria-label": t("status") }, [["todo", t("statusTodo")], ["doing", t("statusDoing")], ["done", t("statusDone")]].map(([st, label]) => {
     const b = el("button", { "data-s": st, "aria-pressed": s.status === st, text: label });
-    b.onclick = () => act(() => api("PATCH", `/api/session/${s.id}`, { status: st }));
+    b.onclick = () => mutate(() => setStatus(s, st), () => api("PATCH", `/api/session/${s.id}`, { status: st }));
     return b;
   })));
   const btns = [];
@@ -207,7 +235,7 @@ function row(s, rank) {
 
   const note = el("textarea", { id: "note-" + s.id, placeholder: t("notePlaceholder"), rows: 1 });
   note.value = s.note || "";
-  note.onchange = () => act(() => api("PATCH", `/api/session/${s.id}`, { note: note.value }));
+  note.onchange = () => mutate(() => { s.note = note.value; }, () => api("PATCH", `/api/session/${s.id}`, { note: note.value }), { rerender: false });
   li.append(
     el("div", { class: "rank", text: String(rank) }),
     el("div", { class: "main" }, [
@@ -227,8 +255,9 @@ function row(s, rank) {
         el("div", {}, [el("b", { text: t("looksDone", { pct: Math.round(s.suggestion.confidence * 100) }) }), " — " + s.suggestion.reason]),
         s.suggestion.evidence ? el("div", { class: "quote", text: "“" + s.suggestion.evidence + "”" + (s.suggestion.quoted ? "" : t("quoteNotFound")) }) : null,
         el("div", { class: "btns" }, [
-          btn(t("confirmDone"), "primary", () => act(() => api("PATCH", `/api/session/${s.id}`, { status: "done", via: "suggestion" }), t("doneToast"))),
-          btn(t("dismiss"), "", () => act(() => api("POST", `/api/dismiss-suggestion/${s.id}`))),
+          btn(t("confirmDone"), "primary", () => mutate(() => setStatus(s, "done", "suggestion"),
+            () => api("PATCH", `/api/session/${s.id}`, { status: "done", via: "suggestion" }), { ok: t("doneToast") })),
+          btn(t("dismiss"), "", () => mutate(() => { s.suggestion = null; }, () => api("POST", `/api/dismiss-suggestion/${s.id}`))),
         ]),
       ]) : null,
       s.autoVerdict ? el("div", { class: "suggest" }, [
@@ -257,7 +286,9 @@ function row(s, rank) {
 }
 
 // Moves operate on the full pending order (filters ignored) and persist all of it.
-function saveOrder(ids) { act(() => api("POST", "/api/order", { ids })); }
+function saveOrder(ids) {
+  mutate(() => ids.forEach((id, i) => { byId(id).priority = (i + 1) * 10; }), () => api("POST", "/api/order", { ids }));
+}
 function move(id, dir) {
   const ids = pendingOrder().map((s) => s.id), i = ids.indexOf(id), j = i + dir;
   if (j < 0 || j >= ids.length) return;
@@ -282,7 +313,17 @@ function hbar(label, segs, val, tip) {
 function legend(entries) { return el("div", { class: "legend" }, entries.map(([c, label]) => el("span", {}, [el("i", { style: `background:var(${c})` }), label]))); }
 
 // The headline tiles sit above every view; they come from /api/insights, fetched apart from the list so it never waits on them.
+let lastInsights = null;
+// Counts that follow local edits are recomputed from the list; the rest (memory, tokens) waits for the next fetch.
+function refreshTiles() {
+  if (!lastInsights) return;
+  const n = (f) => items.filter(f).length;
+  renderTiles({ ...lastInsights, totals: { ...lastInsights.totals,
+    pending: n((s) => s.status !== "done"), untriaged: n((s) => s.status !== "done" && s.priority == null),
+    done: n((s) => s.status === "done"), suggestions: n((s) => s.status !== "done" && s.suggestion) } });
+}
 function renderTiles(d) {
+  lastInsights = d;
   const tot = d.totals, m = d.memory;
   $("#tiles").replaceChildren(
     tile(tot.pending, t("tilePending", { n: tot.untriaged })),
