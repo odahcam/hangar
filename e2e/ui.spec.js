@@ -116,6 +116,16 @@ test("stopped sessions are flagged for attention; sessions in progress get a neu
   expect(await css(doing.locator('[data-s="doing"]'), "color")).toBe(progress);
 });
 
+test("Close idle tabs shows it is working until Terminal answers", async ({ page }) => {
+  const { setTabs } = require("../test/helpers");
+  setTabs(w, [{ tty: "ttys001", busy: false }]);
+  await page.locator("#tabs").getByRole("button", { name: "Insights" }).click();
+  await page.route("**/api/close-idle-tabs", async (route) => { await new Promise((r) => setTimeout(r, 3000)); await route.continue(); });
+  await page.getByRole("button", { name: "Close 1 idle tabs" }).click();
+  await page.getByRole("button", { name: "Confirm" }).click();
+  await expect(page.getByRole("button", { name: "Closing…" })).toBeDisabled({ timeout: 1000 });
+});
+
 test("the Insights tab shows its panels", async ({ page }) => {
   await page.locator("#tabs").getByRole("button", { name: "Insights" }).click();
   await expect(page.locator("#insights .panel h2")).toContainText([

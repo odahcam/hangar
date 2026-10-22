@@ -64,6 +64,11 @@ textarea { width: 100%; box-sizing: border-box; font: 13px var(--sans); color: v
 .btn:hover { border-color: var(--accent); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
 .btn.danger { color: var(--danger); }
+.btn[aria-busy=true] { cursor: progress; opacity: .75; }
+.btn[aria-busy=true]::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 6px; vertical-align: -1px;
+  border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .btn[aria-busy=true]::before { animation: none; } }
 .btn.danger.armed { background: var(--danger); color: var(--surface); border-color: var(--danger); }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .empty { border: 1px dashed var(--line); border-radius: 8px; padding: 24px; text-align: center; color: var(--muted); }
@@ -163,6 +168,14 @@ async function mutate(apply, request, { ok, rerender = true } = {}) {
   clearTimeout(syncTimer);
   syncTimer = setTimeout(() => { if (!inFlight && !dragId) load(); }, 800);
 }
+// Actions that only the server can complete (Terminal, processes): the button shows progress and can't be
+// pressed again until the answer arrives; the reload that follows renders the real outcome.
+function pending(button, label, fn, ok) {
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  button.textContent = label;
+  return act(fn, ok);
+}
 const byId = (id) => items.find((s) => s.id === id);
 function setStatus(s, status, via) {
   s.status = status;
@@ -223,11 +236,14 @@ function row(s, rank) {
   })));
   const btns = [];
   if (view === "pending") btns.push(btn("↑", "", () => move(s.id, -1)), btn("↓", "", () => move(s.id, 1)));
-  btns.push(btn(s.live ? t("goToTab") : t("resume"), "primary", () => act(() => api("POST", `/api/resume/${s.id}`))));
+  const resume = btn(s.live ? t("goToTab") : t("resume"), "primary", () => pending(resume, t("opening"), () => api("POST", `/api/resume/${s.id}`)));
+  btns.push(resume);
   if (s.live) {
+    let disarm;
     const b = btn(t("close"), "danger", () => {
-      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = t("confirmClose"); setTimeout(() => { b.classList.remove("armed"); b.textContent = t("close"); }, 3000); return; }
-      act(() => api("POST", `/api/close/${s.id}`), t("sessionClosed"));
+      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = t("confirmClose"); disarm = setTimeout(() => { b.classList.remove("armed"); b.textContent = t("close"); }, 3000); return; }
+      clearTimeout(disarm);
+      pending(b, t("closing"), () => api("POST", `/api/close/${s.id}`), t("sessionClosed"));
     });
     btns.push(b);
   }
@@ -382,9 +398,11 @@ async function loadInsights() {
 
   const s = d.storage;
   const closeLabel = t("closeIdleTabs", { n: d.idleTabs.length });
+  let disarm;
   const closeTabs = btn(closeLabel, "danger", () => {
-    if (!closeTabs.classList.contains("armed")) { closeTabs.classList.add("armed"); closeTabs.textContent = t("confirm"); setTimeout(() => { closeTabs.classList.remove("armed"); closeTabs.textContent = closeLabel; }, 3000); return; }
-    act(() => api("POST", "/api/close-idle-tabs"), t("tabsClosed"));
+    if (!closeTabs.classList.contains("armed")) { closeTabs.classList.add("armed"); closeTabs.textContent = t("confirm"); disarm = setTimeout(() => { closeTabs.classList.remove("armed"); closeTabs.textContent = closeLabel; }, 3000); return; }
+    clearTimeout(disarm);
+    pending(closeTabs, t("closing"), () => api("POST", "/api/close-idle-tabs"), t("tabsClosed"));
   });
 
   $("#insights").replaceChildren(

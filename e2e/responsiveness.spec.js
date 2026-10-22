@@ -56,6 +56,28 @@ test("dragging reorders immediately", async ({ page }) => {
   await expect(titles(page)).toHaveText(["Charlie", "Alpha", "Bravo"], QUICK);
 });
 
+test("Resume shows it is working until Terminal answers", async ({ page }) => {
+  const resume = rowOf(page, "Alpha").getByRole("button", { name: "Resume", exact: true });
+  await resume.click();
+  const busy = rowOf(page, "Alpha").getByRole("button", { name: "Opening…" });
+  await expect(busy).toBeDisabled(QUICK);
+  await expect(busy).toHaveAttribute("aria-busy", "true");
+  await expect(rowOf(page, "Alpha").getByRole("button", { name: "Resume", exact: true })).toBeEnabled({ timeout: SLOW_MS * 4 });
+});
+
+test("Close shows it is working until the session has stopped", async ({ page }) => {
+  await page.unroute("**/api/**");
+  const { addLive } = require("../test/helpers");
+  addLive(w, s.b);
+  await page.reload();
+  await page.route("**/api/**", async (route) => { await new Promise((r) => setTimeout(r, SLOW_MS)); await route.continue(); });
+  const row = rowOf(page, "Bravo");
+  await row.getByRole("button", { name: "Close" }).click();
+  await row.getByRole("button", { name: "Confirm close" }).click();
+  await expect(row.getByRole("button", { name: "Closing…" })).toBeDisabled(QUICK);
+  await expect(row.locator(".live")).toHaveCount(0, { timeout: SLOW_MS * 4 });
+});
+
 test("a change the server rejects is rolled back with a message", async ({ page }) => {
   await page.unroute("**/api/**");
   await page.route("**/api/session/**", (route) => route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"boom"}' }));
