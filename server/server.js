@@ -14,6 +14,10 @@ const WEB_DIR = process.env.HANGAR_WEB_DIR || path.join(__dirname, "..", "web");
 const HOME = os.homedir();
 const CLAUDE = process.env.HANGAR_CLAUDE_DIR || path.join(HOME, ".claude");
 const DATA = process.env.HANGAR_DATA_DIR || path.join(HOME, "Library/Application Support/Hangar");
+// Overridable so tests can stand in for Terminal and pace the classifier.
+const OSASCRIPT = process.env.HANGAR_OSASCRIPT || "osascript";
+const CLASSIFY_START_MS = Number(process.env.HANGAR_CLASSIFY_START_MS ?? 30e3);
+const CLASSIFY_EVERY_MS = Number(process.env.HANGAR_CLASSIFY_EVERY_MS ?? 10 * 60e3);
 const BACKUP = path.join(DATA, "transcripts");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 fs.mkdirSync(BACKUP, { recursive: true });
@@ -239,7 +243,7 @@ end repeat
 return out`;
 
 async function terminalTabs() {
-  const { out } = await run("osascript", ["-e", TABS_SCRIPT]);
+  const { out } = await run(OSASCRIPT, ["-e", TABS_SCRIPT]);
   const tabs = {};
   for (const line of (out || "").split("\n")) {
     const [tty, busy, title] = line.split("\t");
@@ -436,7 +440,7 @@ async function insights() {
 // Idle = Terminal reports nothing but the login shell running; exiting the shell lets Terminal close the tab.
 async function closeIdleTabs() {
   const idle = Object.entries(await terminalTabs()).filter(([, t]) => !t.busy).map(([tty]) => tty);
-  for (const tty of idle) await run("osascript", ["-e", tabScript(tty, 'if busy of t is false then do script "exit" in t')]);
+  for (const tty of idle) await run(OSASCRIPT, ["-e", tabScript(tty, 'if busy of t is false then do script "exit" in t')]);
   return { closed: idle.length };
 }
 
@@ -445,7 +449,7 @@ async function resume(id) {
   if (!t) throw httpError(404, "unknown_session");
   const live = (await liveSessions())[id];
   if (live?.tty) {
-    const r = await run("osascript", ["-e", tabScript(live.tty, "set selected of t to true\nset index of w to 1\nactivate")]);
+    const r = await run(OSASCRIPT, ["-e", tabScript(live.tty, "set selected of t to true\nset index of w to 1\nactivate")]);
     if (r.out?.trim() === "ok") return { focused: live.tty };
   }
   const saved = path.join(BACKUP, id + ".jsonl");
@@ -454,7 +458,7 @@ async function resume(id) {
     fs.copyFileSync(saved, t.file);
   }
   const cmd = `cd ${shQuote(t.cwd || HOME)} && claude --resume ${id}`;
-  await run("osascript", ["-e", `tell application "Terminal"\ndo script ${asString(cmd)}\nactivate\nend tell`]);
+  await run(OSASCRIPT, ["-e", `tell application "Terminal"\ndo script ${asString(cmd)}\nactivate\nend tell`]);
   return { opened: true };
 }
 
@@ -468,7 +472,7 @@ async function close(id) {
     await new Promise((r) => setTimeout(r, 100));
   }
   // The tab is back at its shell prompt; exiting the shell lets Terminal close it.
-  if (live.tty) await run("osascript", ["-e", tabScript(live.tty, 'do script "exit" in t')]);
+  if (live.tty) await run(OSASCRIPT, ["-e", tabScript(live.tty, 'do script "exit" in t')]);
   return { closed: true };
 }
 
@@ -537,6 +541,7 @@ const server = http.createServer(async (req, res) => {
     if (action === "insights" && req.method === "GET") return send(200, await insights());
     if (action === "close-idle-tabs" && req.method === "POST") return send(200, await closeIdleTabs());
     if (action === "order" && req.method === "POST") { setOrder((await readBody(req)).ids); return send(200, { ok: true }); }
+    if (!["session", "dismiss-suggestion", "resume", "close"].includes(action)) return send(404, { error: "not found" });
     if (!UUID.test(id || "")) return send(400, { error: "id" });
 
     if (action === "session" && req.method === "PATCH") { updateState(id, await readBody(req)); return send(200, { ok: true }); }
@@ -556,8 +561,8 @@ server.listen(PORT, "127.0.0.1", () => {
   scanAll();
   seedDone();
   scanAll();
-  setTimeout(classifyPending, 30e3);
-  setInterval(() => { scanAll(); classifyPending(); }, 10 * 60e3);
+  setTimeout(classifyPending, CLASSIFY_START_MS);
+  setInterval(() => { scanAll(); classifyPending(); }, CLASSIFY_EVERY_MS);
   // Launched by the macOS app: if the app dies without stopping us, we get re-parented to launchd and exit.
   if (process.env.HANGAR_EXIT_WITH_PARENT) {
     const parent = process.ppid;

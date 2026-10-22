@@ -4,12 +4,19 @@
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "description": "Catalog, prioritize and resume your Claude Code sessions on macOS.",
-  "engines": { "node": ">=22.5" },
+  "engines": {
+    "node": ">=22.5"
+  },
   "scripts": {
     "start": "node --no-warnings server/server.js",
-    "build": "scripts/build.sh"
+    "build": "scripts/build.sh",
+    "test": "node --test test/*.test.js",
+    "test:e2e": "playwright test",
+    "test:build": "node --test test-build/*.test.js",
+    "test:all": "npm test && npm run test:e2e && npm run test:build"
   },
   "devDependencies": {
+    "@playwright/test": "1.48.2",
     "esbuild": "0.24.0",
     "postject": "1.0.0-alpha.6"
   }

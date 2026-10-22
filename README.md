@@ -73,6 +73,16 @@ open build/Hangar.app
 
 `npm start` runs only the server; open the URL it prints.
 
+## Tests
+
+```sh
+npm test            # server: scanning, state, Terminal actions, done detection, insights, i18n, repo hygiene
+npm run test:e2e    # the UI in Chrome, against a real server and fixture sessions
+npm run test:build  # builds the app and checks the bundle, signature and bundled server
+```
+
+Tests never touch your real `~/.claude` or Terminal: each one runs a server over a throwaway fixture directory, with fake `osascript` and `claude` binaries in `test/bin/`.
+
 ## License
 
 Source-available, not open source. You may use Hangar and modify it for personal use; you may not redistribute it or modified versions, paid or free. Contributions through pull requests are welcome. See [LICENSE](LICENSE).
