@@ -34,7 +34,7 @@ async function launchDesktop(w, env) {
   const proc = spawn(APP, [], {
     env: {
       ...process.env,
-      HANGAR_CLAUDE_DIR: w.claude,
+      HANGAR_CLAUDE_DIRS: w.accounts.join(path.delimiter),
       HANGAR_DATA_DIR: w.data,
       HANGAR_WEBVIEW_DATA: profile,
       // Port 0: the webview picks a free one and writes it to DevToolsActivePort in its profile, so parallel

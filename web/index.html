@@ -102,6 +102,20 @@ th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line
 th { color: var(--muted); font-weight: 500; }
 td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
 .scroll { overflow-x: auto; }
+#settings { display: flex; flex-direction: column; gap: 12px; align-items: stretch; }
+#settings > div:first-child { align-self: flex-start; }
+#settingsBtn[aria-pressed=true] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.acct { border: 1px solid currentColor; border-radius: 4px; padding: 0 6px; }
+.transfer { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; margin: 6px 0; }
+.transfer select { font: 12px var(--sans); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+.accts { display: flex; flex-direction: column; gap: 8px; }
+.accts .a { display: grid; grid-template-columns: 28px minmax(0, 160px) 1fr auto; gap: 8px; align-items: center; font-size: 12px; }
+.accts .a.off { opacity: .55; }
+.accts input[type=color] { width: 28px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 4px; background: none; }
+.accts input[type=text] { font: 13px var(--sans); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; min-width: 0; }
+.accts .dir { font: 11px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.accts form { display: flex; gap: 6px; }
+.accts form input { flex: 1; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; background: var(--fg); color: var(--bg); font-size: 13px; padding: 8px 14px; border-radius: 6px; }
 </style>
 </head>
@@ -111,6 +125,7 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
     <h1>Hangar</h1>
     <span class="counts" id="counts" data-i18n="loading"></span>
     <select id="locale" data-i18n-label="language"><option value="en">English</option><option value="pt">Português</option></select>
+    <button class="btn" id="settingsBtn" data-i18n-label="settings">⚙</button>
   </header>
   <div class="tiles" id="tiles"></div>
   <nav id="tabs">
@@ -119,8 +134,10 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
     <button data-v="insights" data-i18n="tabInsights"></button>
   </nav>
   <div id="insights" hidden></div>
+  <div id="settings" hidden></div>
   <div class="toolbar" id="toolbar">
     <input type="search" id="q" data-i18n-placeholder="filterPlaceholder" data-i18n-label="filter">
+    <select id="acct" data-i18n-label="account" hidden></select>
     <select id="proj" data-i18n-label="project"></select>
     <label class="btn"><input type="checkbox" id="liveOnly"> <span data-i18n="openOnly"></span></label>
     <label class="btn"><input type="checkbox" id="suggestedOnly"> <span data-i18n="suggestedOnly"></span></label>
@@ -137,8 +154,21 @@ for (const e of document.querySelectorAll("[data-i18n-label]")) e.setAttribute("
 document.querySelector("#locale").value = LOCALE;
 document.querySelector("#locale").onchange = (e) => setLocale(e.target.value);
 const $ = (s) => document.querySelector(s);
-let items = [], view = "pending", dragId = null;
-try { const v = location.hash.slice(1) || localStorage.getItem("view"); if (v === "done" || v === "insights") view = v; } catch {}
+let items = [], accounts = [], view = "pending", dragId = null;
+// Accounts are only shown once there is more than one to tell apart.
+const shown = () => accounts.filter((a) => !a.hidden);
+const multi = () => shown().length > 1;
+const accountOf = (dir) => accounts.find((a) => a.dir === dir);
+try { const v = location.hash.slice(1) || localStorage.getItem("view"); if (["done", "insights", "settings"].includes(v)) view = v; } catch {}
+const settingsBack = () => showView(lastTab);
+// Also called by the desktop app's Settings… menu item. Settings stands apart from the tabs: it isn't remembered,
+// and its back button returns to the tab it was opened from.
+let lastTab = view === "settings" ? "pending" : view;
+function showView(v) {
+  if (v !== "settings") { lastTab = v; try { localStorage.setItem("view", v); } catch {} }
+  view = v;
+  render();
+}
 
 // The desktop app calls the core in-process (Tauri invoke); in a browser (tests, `npm start`) the same API is HTTP.
 // Looked up per call so the desktop e2e target can stand in for a slow or failing core.
@@ -150,7 +180,9 @@ async function api(method, path, body) {
   if (!r.ok) throw new Error(j.error || r.status);
   return j;
 }
-async function act(fn, ok) { try { await fn(); if (ok) toast(ok); } catch (e) { toast(t("failed", { msg: e.message })); } await load(); }
+// Server error codes with a sentence of their own (err_<code> in i18n.js); others show as they are.
+function failed(e) { const k = "err_" + e.message, s = t(k); return t("failed", { msg: s === k ? e.message : s }); }
+async function act(fn, ok) { try { await fn(); if (ok) toast(ok); } catch (e) { toast(failed(e)); } await load(); }
 
 // Edits apply to the local list and render at once; the request runs behind. A refused request reloads the
 // server's state (rolling the edit back). Once no request is in flight, a quiet reload picks up derived fields.
@@ -164,7 +196,7 @@ async function mutate(apply, request, { ok, rerender = true } = {}) {
     await request();
     if (ok) toast(ok);
   } catch (e) {
-    toast(t("failed", { msg: e.message }));
+    toast(failed(e));
     inFlight--;
     return load();
   }
@@ -210,15 +242,20 @@ function byPriority(a, b) {
 function pendingOrder() { return items.filter((s) => s.status !== "done").sort(byPriority); }
 
 function render() {
-  const ins = view === "insights";
-  $("#insights").hidden = !ins; $("#toolbar").hidden = ins; $("#list").hidden = ins;
+  const ins = view === "insights", set = view === "settings";
+  $("#insights").hidden = !ins; $("#settings").hidden = !set; $("#toolbar").hidden = ins || set; $("#list").hidden = ins || set;
+  $("#tabs").hidden = set; $("#tiles").hidden = set;
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-pressed", b.dataset.v === view);
-  if (ins) { $("#empty").hidden = true; return loadInsights(); }
+  $("#settingsBtn").setAttribute("aria-pressed", set);
+  if (ins || set) $("#empty").hidden = true;
+  if (ins) return loadInsights();
+  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), accountsPanel());
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
+  const acct = multi() ? $("#acct").value : "";
   const base = view === "pending" ? pendingOrder()
     : items.filter((s) => s.status === "done").sort((a, b) => (b.doneAt || "").localeCompare(a.doneAt || ""));
-  const list = base.filter((s) => (!p || s.project === p) && (!liveOnly || s.live) && (!suggestedOnly || s.suggestion) &&
-    (!qs || [s.title, s.aiTitle, s.project, s.branch, s.firstPrompt, s.lastPrompt, s.note, s.id].join(" ").toLowerCase().includes(qs)));
+  const list = base.filter((s) => (!p || s.project === p) && (!acct || s.account === acct) && (!liveOnly || s.live) && (!suggestedOnly || s.suggestion) &&
+    (!qs || [s.title, s.aiTitle, s.project, s.branch, s.firstPrompt, s.lastPrompt, s.note, s.id, accountOf(s.account)?.name].join(" ").toLowerCase().includes(qs)));
   $("#list").replaceChildren(...list.map((s, i) => row(s, view === "pending" ? i + 1 : "")));
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-pressed", b.dataset.v === view);
   $("#empty").hidden = list.length > 0;
@@ -264,6 +301,7 @@ function row(s, rank) {
     el("div", { class: "main" }, [
       el("div", { class: "title", text: s.title }),
       el("div", { class: "meta" }, [
+        multi() && accountOf(s.account) ? el("span", { class: "acct", style: `color:${accountOf(s.account).color}`, text: accountOf(s.account).name }) : null,
         el("span", { class: "chip", text: s.project || "?" }),
         s.branch ? el("span", { text: "⎇ " + s.branch }) : null,
         el("span", { text: t("active", { ago: ago(s.lastAt) }) }),
@@ -271,6 +309,7 @@ function row(s, rank) {
         s.priority == null && s.status !== "done" ? el("span", { class: "chip", text: t("isNew") }) : null,
         !s.transcript ? el("span", { class: s.backedUp ? "" : "warn", text: s.backedUp ? t("onlyBackup") : t("transcriptGone") }) : null,
         s.backedUp ? el("span", { text: t("backupOk") }) : null,
+        s.alsoIn?.length ? el("span", { text: t("alsoIn", { names: s.alsoIn.map((d) => accountOf(d)?.name || d).join(", ") }) }) : null,
         el("span", { text: s.id.slice(0, 8) }),
       ]),
       s.lastPrompt ? el("div", { class: "prompt", text: "› " + s.lastPrompt }) : null,
@@ -293,7 +332,8 @@ function row(s, rank) {
         s.aiTitle ? el("p", { text: t("aiTitle", { v: s.aiTitle }) }) : null,
         el("p", { text: t("firstPrompt", { v: s.firstPrompt || "—" }) }),
         el("p", { text: t("promptsCwd", { n: s.prompts, cwd: s.cwd }) }),
-        el("p", {}, [el("code", { text: `cd '${s.cwd}' && claude --resume ${s.id}` })]),
+        el("p", {}, [el("code", { text: `cd '${s.cwd}' && ${s.account && !accountOf(s.account)?.default ? `CLAUDE_CONFIG_DIR='${s.account}' ` : ""}claude --resume ${s.id}` })]),
+        multi() ? transferControl(s) : null,
       ]),
     ]),
     el("div", { class: "side" }, side),
@@ -306,6 +346,20 @@ function row(s, rank) {
     li.addEventListener("drop", (e) => { e.preventDefault(); li.classList.remove("over"); if (dragId) placeBefore(dragId, s.id); });
   }
   return li;
+}
+
+// Copies the session into another account, the source kept unless "remove" is checked. An open session can't go:
+// it keeps writing where it started.
+function transferControl(s) {
+  const targets = shown().filter((a) => a.dir !== s.account);
+  const sel = el("select", { "aria-label": t("transferTo") }, targets.map((a) => el("option", { value: a.dir, text: a.name })));
+  const rm = el("input", { type: "checkbox" });
+  const go = btn(t("copy"), "", () => pending(go, t("transferring"), () => api("POST", `/api/transfer/${s.id}`, { to: sel.value, remove: rm.checked }),
+    t(rm.checked ? "movedTo" : "copiedTo", { name: accountOf(sel.value)?.name })));
+  rm.onchange = () => { go.textContent = t(rm.checked ? "move" : "copy"); };
+  if (s.live) { go.disabled = true; go.title = t("err_open"); }
+  return el("div", { class: "transfer" }, [el("span", { text: t("transferTo") }), sel,
+    el("label", {}, [rm, " " + t("removeFrom", { name: accountOf(s.account)?.name || "" })]), go]);
 }
 
 // Moves operate on the full pending order (filters ignored) and persist all of it.
@@ -360,6 +414,30 @@ function renderTiles(d) {
 }
 async function loadTiles() {
   try { renderTiles(await api("GET", "/api/insights")); } catch {}
+}
+
+// One row per Claude Code config folder. Name and color are the user's; a folder Hangar found on its own can be
+// hidden, one added by hand removed.
+function accountsPanel() {
+  const stats = (dir) => {
+    const mine = items.filter((s) => s.account === dir);
+    return { sessions: mine.length, pending: mine.filter((s) => s.status !== "done").length, live: mine.filter((s) => s.live).length };
+  };
+  const save = (a, patch) => mutate(() => Object.assign(a, patch), () => api("PATCH", "/api/account", { dir: a.dir, ...patch }), { rerender: false });
+  const rows = accounts.map((a) => {
+    const name = el("input", { type: "text", value: a.name, "aria-label": t("accountName") });
+    name.onchange = () => save(a, { name: name.value });
+    const color = el("input", { type: "color", value: a.color, "aria-label": t("accountColor") });
+    color.onchange = () => save(a, { color: color.value });
+    const toggle = a.hidden ? btn(t("show"), "", () => act(() => api("PATCH", "/api/account", { dir: a.dir, hidden: false })))
+      : btn(a.added ? t("remove") : t("hide"), "", () => act(() => api("DELETE", "/api/account", { dir: a.dir })));
+    return el("div", { class: "a" + (a.hidden ? " off" : "") }, [color, name,
+      el("div", {}, [el("div", { class: "dir", text: a.dir }), el("div", { class: "meta", text: a.hidden ? t("hiddenL") : t("acctCounts", stats(a.dir)) })]), toggle]);
+  });
+  const input = el("input", { type: "text", placeholder: t("addFolderPlaceholder"), "aria-label": t("addFolder") });
+  const form = el("form", {}, [input, el("button", { class: "btn", type: "submit", text: t("addFolder") })]);
+  form.onsubmit = (e) => { e.preventDefault(); act(() => api("POST", "/api/accounts", { dir: input.value }), t("folderAdded")); };
+  return panel(t("pAccounts"), t("pAccountsSub"), [el("div", { class: "accts" }, [...rows, form])]);
 }
 
 async function loadInsights() {
@@ -440,19 +518,25 @@ async function loadInsights() {
 }
 
 async function load() {
-  try { items = await api("GET", "/api/sessions"); } catch (e) { $("#counts").textContent = t("serverDown", { msg: e.message }); return; }
+  try { [items, accounts] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts")]); } catch (e) { $("#counts").textContent = t("serverDown", { msg: e.message }); return; }
   const sel = $("#proj"), cur = sel.value;
   sel.replaceChildren(el("option", { value: "", text: t("allProjects") }), ...[...new Set(items.map((s) => s.project).filter(Boolean))].sort().map((p) => el("option", { value: p, text: p })));
   sel.value = cur;
+  const asel = $("#acct"), acur = asel.value;
+  asel.replaceChildren(el("option", { value: "", text: t("allAccounts") }), ...shown().map((a) => el("option", { value: a.dir, text: a.name })));
+  asel.value = shown().some((a) => a.dir === acur) ? acur : "";
+  asel.hidden = !multi();
   const focused = document.activeElement?.id;
   render();
   if (view !== "insights") loadTiles();
   if (focused) document.getElementById(focused)?.focus();
 }
 
-$("#tabs").onclick = (e) => { const v = e.target.dataset?.v; if (!v) return; view = v; try { localStorage.setItem("view", v); } catch {} render(); };
+$("#tabs").onclick = (e) => { const v = e.target.dataset?.v; if (v) showView(v); };
+$("#settingsBtn").onclick = () => view === "settings" ? settingsBack() : showView("settings");
 $("#q").oninput = render;
 $("#proj").onchange = render;
+$("#acct").onchange = render;
 $("#liveOnly").onchange = render;
 $("#suggestedOnly").onchange = render;
 document.addEventListener("visibilitychange", () => { if (!document.hidden && !document.activeElement?.matches("textarea")) load(); });

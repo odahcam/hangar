@@ -88,8 +88,12 @@ impl Platform for MacOs {
         osascript(&tab_script(tty, "set selected of t to true\nset index of w to 1\nactivate")).trim() == "ok"
     }
 
-    fn open(&self, cwd: &str, id: &str) -> Result<(), String> {
-        let cmd = format!("cd {} && claude --resume {id}", sh_quote(cwd));
+    fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String> {
+        let env = match config {
+            Some(dir) => format!("CLAUDE_CONFIG_DIR={} ", sh_quote(&dir.to_string_lossy())),
+            None => "unset CLAUDE_CONFIG_DIR && ".into(),
+        };
+        let cmd = format!("cd {} && {env}claude --resume {id}", sh_quote(cwd));
         osascript(&format!("tell application \"Terminal\"\ndo script {}\nactivate\nend tell", as_string(&cmd)));
         Ok(())
     }

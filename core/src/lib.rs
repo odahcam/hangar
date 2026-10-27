@@ -1,8 +1,10 @@
-// Hangar core: local catalog of Claude Code sessions. Reads ~/.claude live, keeps status/priority/notes in SQLite,
-// backs up pending transcripts, asks Haiku which closed sessions look done, and drives the terminal (see platform/).
+// Hangar core: local catalog of Claude Code sessions. Reads every account's config dir live (~/.claude, ~/.claude-*;
+// see accounts.rs), keeps status/priority/notes in SQLite, backs up pending transcripts, asks Haiku which closed
+// sessions look done, and drives the terminal (see platform/).
 //
 // Every entry point is `Hangar::handle(method, path, body)`, the same JSON API whether it is called in-process by the
 // desktop app (Tauri `invoke`) or over HTTP by the `hangar-server` binary the tests and `npm start` use.
+mod accounts;
 mod classify;
 mod db;
 mod insights;
@@ -48,8 +50,10 @@ pub(crate) fn local_day(iso: &str) -> Option<String> {
 }
 
 pub struct Config {
-    /// Claude Code's config directory (~/.claude, or $CLAUDE_CONFIG_DIR).
-    pub claude_dir: PathBuf,
+    /// Claude Code config directories, one per account, always scanned.
+    pub claude_dirs: Vec<PathBuf>,
+    /// Also scan every ~/.claude and ~/.claude-* that has a projects folder (see accounts.rs).
+    pub discover: bool,
     /// Hangar's own state: state.db and the transcript backups.
     pub data_dir: PathBuf,
     /// When the first background rescan + done detection runs, and how often after that.
@@ -58,13 +62,19 @@ pub struct Config {
 }
 
 impl Config {
-    /// HANGAR_CLAUDE_DIR / HANGAR_DATA_DIR override the defaults (tests point them at a throwaway world),
-    /// HANGAR_CLASSIFY_START_MS / HANGAR_CLASSIFY_EVERY_MS pace the classifier.
+    /// HANGAR_CLAUDE_DIRS (a PATH-style list) / HANGAR_CLAUDE_DIR / HANGAR_DATA_DIR override the defaults and turn
+    /// discovery off (tests point them at a throwaway world); HANGAR_CLASSIFY_START_MS / HANGAR_CLASSIFY_EVERY_MS pace
+    /// the classifier.
     pub fn from_env() -> Self {
         let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
         let ms = |k: &str, default: u64| Duration::from_millis(std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(default));
+        let fixed: Option<Vec<PathBuf>> = std::env::var_os("HANGAR_CLAUDE_DIRS")
+            .filter(|v| !v.is_empty())
+            .map(|v| std::env::split_paths(&v).collect())
+            .or_else(|| env("HANGAR_CLAUDE_DIR").map(|d| vec![d]));
         Config {
-            claude_dir: env("HANGAR_CLAUDE_DIR").or_else(|| env("CLAUDE_CONFIG_DIR")).unwrap_or_else(|| home().join(".claude")),
+            discover: fixed.is_none(),
+            claude_dirs: fixed.unwrap_or_else(|| env("CLAUDE_CONFIG_DIR").into_iter().collect()),
             data_dir: env("HANGAR_DATA_DIR").unwrap_or_else(|| platform::current().data_dir(&home())),
             classify_start: ms("HANGAR_CLASSIFY_START_MS", 30_000),
             classify_every: ms("HANGAR_CLASSIFY_EVERY_MS", 600_000),
@@ -73,7 +83,8 @@ impl Config {
 }
 
 pub struct Hangar {
-    claude: PathBuf,
+    claude_dirs: Vec<PathBuf>,
+    discover: bool,
     backup_dir: PathBuf,
     db: Mutex<Connection>,
     timing: (Duration, Duration),
@@ -103,7 +114,7 @@ impl Hangar {
         let backup_dir = cfg.data_dir.join("transcripts");
         std::fs::create_dir_all(&backup_dir).map_err(|e| format!("{}: {e}", backup_dir.display()))?;
         let db = db::open(&cfg.data_dir.join("state.db")).map_err(|e| e.to_string())?;
-        let h = Arc::new(Hangar { claude: cfg.claude_dir, backup_dir, timing: (cfg.classify_start, cfg.classify_every), db: Mutex::new(db), classifying: AtomicBool::new(false), platform: platform::current() });
+        let h = Arc::new(Hangar { claude_dirs: cfg.claude_dirs, discover: cfg.discover, backup_dir, timing: (cfg.classify_start, cfg.classify_every), db: Mutex::new(db), classifying: AtomicBool::new(false), platform: platform::current() });
         {
             let db = h.db();
             h.scan_all(&db).and_then(|_| h.seed_done(&db)).and_then(|_| h.scan_all(&db)).map_err(|e| e.to_string())?;
@@ -197,13 +208,17 @@ impl Hangar {
             ("GET", "sessions") => return self.list_sessions().map(Value::from),
             ("GET", "insights") => return self.insights(),
             ("POST", "close-idle-tabs") => return Ok(self.close_idle_tabs()),
+            ("GET", "accounts") => return self.list_accounts().map(Value::from),
+            ("POST", "accounts") => return self.add_account(&parse()?),
+            ("PATCH", "account") => return self.update_account(&parse()?),
+            ("DELETE", "account") => return self.remove_account(&parse()?),
             ("POST", "order") => {
                 self.set_order(&parse()?["ids"])?;
                 return Ok(json!({ "ok": true }));
             }
             _ => {}
         }
-        if !["session", "dismiss-suggestion", "resume", "close"].contains(&action) {
+        if !["session", "dismiss-suggestion", "resume", "close", "transfer"].contains(&action) {
             return Err(not_found());
         }
         if !UUID.is_match(id) {
@@ -220,6 +235,7 @@ impl Hangar {
             }
             ("POST", "resume") => self.resume(id),
             ("POST", "close") => self.close(id),
+            ("POST", "transfer") => self.transfer(id, &parse()?),
             _ => Err(not_found()),
         }
     }

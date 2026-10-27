@@ -4,10 +4,10 @@ use crate::{local_day, Hangar, UUID};
 use regex::Regex;
 use rusqlite::Connection;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 static NOT_HUMAN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(<|\[|Base directory|Another Claude)").unwrap());
@@ -57,7 +57,7 @@ pub fn human_prompt(rec: &Value) -> String {
     }
 }
 
-fn mtime_ms(meta: &fs::Metadata) -> f64 {
+pub(crate) fn mtime_ms(meta: &fs::Metadata) -> f64 {
     meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs_f64() * 1000.0)
 }
 
@@ -171,26 +171,42 @@ pub fn scan_file(db: &Connection, file: &Path) -> rusqlite::Result<bool> {
 }
 
 impl Hangar {
-    pub(crate) fn scan_all(&self, db: &Connection) -> rusqlite::Result<()> {
-        let Ok(dirs) = fs::read_dir(self.claude.join("projects")) else { return Ok(()) };
-        for dir in dirs.flatten() {
-            let Ok(names) = fs::read_dir(dir.path()) else { continue };
-            for entry in names.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let Some(id) = name.strip_suffix(".jsonl") else { continue };
-                if !UUID.is_match(id) || !entry.path().is_file() {
-                    continue;
-                }
-                let changed = scan_file(db, &entry.path())?;
-                if db::pending(db, id)? && (changed || !self.backup_dir.join(&name).exists()) {
-                    self.backup(db, id)?;
+    /// Scans every account. A session copied to another account (transfer that keeps the source) has a transcript in
+    /// each: the one written last is the session, ties go to the one already tracked. Returns the other copies by id.
+    pub(crate) fn scan_all(&self, db: &Connection) -> rusqlite::Result<HashMap<String, Vec<PathBuf>>> {
+        let mut found: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        for claude in self.dirs_in(db) {
+            let Ok(dirs) = fs::read_dir(claude.join("projects")) else { continue };
+            for dir in dirs.flatten() {
+                let Ok(names) = fs::read_dir(dir.path()) else { continue };
+                for entry in names.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let Some(id) = name.strip_suffix(".jsonl") else { continue };
+                    if UUID.is_match(id) && entry.path().is_file() {
+                        found.entry(id.to_string()).or_default().push(entry.path());
+                    }
                 }
             }
         }
-        Ok(())
+        let mut copies = HashMap::new();
+        for (id, mut files) in found {
+            if files.len() > 1 {
+                let tracked = db::get_t(db, &id)?.map(|t| PathBuf::from(t.file));
+                let rank = |f: &PathBuf| (fs::metadata(f).map_or(0.0, |m| mtime_ms(&m)), Some(f) == tracked.as_ref());
+                files.sort_by(|a, b| rank(b).partial_cmp(&rank(a)).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            let changed = scan_file(db, &files[0])?;
+            if db::pending(db, &id)? && (changed || !self.backup_dir.join(format!("{id}.jsonl")).exists()) {
+                self.backup(db, &id)?;
+            }
+            if files.len() > 1 {
+                copies.insert(id, files.split_off(1));
+            }
+        }
+        Ok(copies)
     }
 
-    // Pending transcripts are copied out of ~/.claude so cleanupPeriodDays can never take them.
+    // Pending transcripts are copied out of the config dir so cleanupPeriodDays can never take them.
     pub(crate) fn backup(&self, db: &Connection, id: &str) -> rusqlite::Result<()> {
         if let Some(t) = db::get_t(db, id)? {
             if Path::new(&t.file).exists() {

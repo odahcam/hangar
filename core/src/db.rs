@@ -13,7 +13,9 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
         "create table if not exists state (
           id text primary key, status text not null default 'todo', priority real,
           note text not null default '', done_at text, done_by text);
-        create table if not exists meta (key text primary key, value text);",
+        create table if not exists meta (key text primary key, value text);
+        create table if not exists account (
+          dir text primary key, name text, color text, added integer not null default 0, hidden integer not null default 0);",
     )?;
     if get_meta(&db, "schema")?.as_deref() != Some(SCHEMA) {
         db.execute_batch("drop table if exists transcript; drop table if exists activity;")?;
@@ -222,6 +224,39 @@ pub fn put_v(db: &Connection, v: &Verdict) -> rusqlite::Result<()> {
 
 pub fn dismiss_v(db: &Connection, id: &str) -> rusqlite::Result<()> {
     db.execute("update verdict set dismissed = 1 where id = ?", [id]).map(drop)
+}
+
+/// What the user set for an account: its name and color, and whether they added the folder by hand or hid it.
+/// Accounts with no row keep their defaults.
+#[derive(Clone, Default)]
+pub struct Account {
+    pub dir: String,
+    pub name: Option<String>,
+    pub color: Option<String>,
+    pub added: bool,
+    pub hidden: bool,
+}
+
+pub fn all_accounts(db: &Connection) -> rusqlite::Result<Vec<Account>> {
+    db.prepare_cached("select * from account order by rowid")?
+        .query_map([], |r| {
+            Ok(Account { dir: r.get("dir")?, name: r.get("name")?, color: r.get("color")?, added: r.get::<_, i64>("added")? != 0, hidden: r.get::<_, i64>("hidden")? != 0 })
+        })?
+        .collect()
+}
+
+pub fn put_account(db: &Connection, a: &Account) -> rusqlite::Result<()> {
+    // An upsert, not insert-or-replace: the rowid (the order accounts are listed in) survives a rename.
+    db.prepare_cached(
+        "insert into account (dir, name, color, added, hidden) values (?, ?, ?, ?, ?)
+        on conflict (dir) do update set name = excluded.name, color = excluded.color, added = excluded.added, hidden = excluded.hidden",
+    )?
+        .execute(params![a.dir, a.name, a.color, a.added as i64, a.hidden as i64])
+        .map(drop)
+}
+
+pub fn delete_account(db: &Connection, dir: &str) -> rusqlite::Result<()> {
+    db.execute("delete from account where dir = ?", [dir]).map(drop)
 }
 
 pub fn get_meta(db: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
