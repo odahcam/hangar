@@ -140,7 +140,11 @@ const $ = (s) => document.querySelector(s);
 let items = [], view = "pending", dragId = null;
 try { const v = location.hash.slice(1) || localStorage.getItem("view"); if (v === "done" || v === "insights") view = v; } catch {}
 
+// The desktop app calls the core in-process (Tauri invoke); in a browser (tests, `npm start`) the same API is HTTP.
+// Looked up per call so the desktop e2e target can stand in for a slow or failing core.
 async function api(method, path, body) {
+  const core = window.__TAURI__?.core;
+  if (core) return core.invoke("api", { method, path, body: body ?? null }).catch((e) => { throw new Error(e); });
   const r = await fetch(path, { method, headers: { "x-hangar": "1", "content-type": "application/json" }, body: body && JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || r.status);
@@ -236,8 +240,11 @@ function row(s, rank) {
   })));
   const btns = [];
   if (view === "pending") btns.push(btn("↑", "", () => move(s.id, -1)), btn("↓", "", () => move(s.id, 1)));
-  const resume = btn(s.live ? t("goToTab") : t("resume"), "primary", () => pending(resume, t("opening"), () => api("POST", `/api/resume/${s.id}`)));
-  btns.push(resume);
+  // A running session whose tab can't be brought forward gets no button: resuming it again would fork it.
+  if (!s.live || s.live.canFocus) {
+    const resume = btn(s.live ? t("goToTab") : t("resume"), "primary", () => pending(resume, t("opening"), () => api("POST", `/api/resume/${s.id}`)));
+    btns.push(resume);
+  }
   if (s.live) {
     let disarm;
     const b = btn(t("close"), "danger", () => {
@@ -341,15 +348,15 @@ function refreshTiles() {
 function renderTiles(d) {
   lastInsights = d;
   const tot = d.totals, m = d.memory;
-  $("#tiles").replaceChildren(
+  $("#tiles").replaceChildren(...[
     tile(tot.pending, t("tilePending", { n: tot.untriaged })),
     tile(tot.live, t("tileLive")),
     tile(fmtMb(m.liveTotalMb), t("tileRam")),
     tile(fmtMb(m.swapUsedMb), t("tileSwap", { ram: fmtMb(m.ramTotalMb) })),
     tile(fmtTok(tot.tokensOut), t("tileTokens")),
-    tile(d.idleTabs.length, t("tileIdleTabs")),
+    d.idleTabs ? tile(d.idleTabs.length, t("tileIdleTabs")) : null,
     tile(tot.suggestions, t("tileSuggestions", { auto: tot.autoDone, classified: tot.classified, cost: tot.classifyCostUsd.toFixed(3) })),
-  );
+  ].filter(Boolean));
 }
 async function loadTiles() {
   try { renderTiles(await api("GET", "/api/insights")); } catch {}
@@ -397,7 +404,7 @@ async function loadInsights() {
   ])]);
 
   const s = d.storage;
-  const closeLabel = t("closeIdleTabs", { n: d.idleTabs.length });
+  const closeLabel = t("closeIdleTabs", { n: d.idleTabs?.length });
   let disarm;
   const closeTabs = btn(closeLabel, "danger", () => {
     if (!closeTabs.classList.contains("armed")) { closeTabs.classList.add("armed"); closeTabs.textContent = t("confirm"); disarm = setTimeout(() => { closeTabs.classList.remove("armed"); closeTabs.textContent = closeLabel; }, 3000); return; }
@@ -425,9 +432,9 @@ async function loadInsights() {
         tile(s.pendingWithoutBackup.length, t("sNoBackup")),
         tile(s.expiringSoon.length, t("sExpiring")),
       ]), ...s.expiringSoon.map((x) => el("div", { class: x.backedUp ? "" : "warn", text: t("expires", { title: x.title, date: x.expiresAt.slice(0, 10) }) + (x.backedUp ? t("hasBackup") : t("noBackup")) }))]),
-      panel(t("pIdleTabs"), t("pIdleTabsSub"), [
+      d.idleTabs ? panel(t("pIdleTabs"), t("pIdleTabsSub"), [
         el("div", { class: "meta", text: d.idleTabs.join(" · ") || t("none") }),
-        d.idleTabs.length ? el("div", {}, [closeTabs]) : null]),
+        d.idleTabs.length ? el("div", {}, [closeTabs]) : null]) : null,
     ]),
   );
 }

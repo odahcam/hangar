@@ -1,0 +1,45 @@
+# Every push: the core's acceptance suite, the UI e2e specs and the packaged desktop app, on macOS and Windows.
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+
+      - name: Core (unit suite over HTTP)
+        run: npm test
+      - name: UI e2e, web target
+        run: npm run test:e2e
+      # WebView2 speaks the DevTools protocol, so on Windows the same specs drive the real desktop app.
+      - name: UI e2e, desktop app
+        if: runner.os == 'Windows'
+        run: npm run test:desktop
+      - name: Packaged app
+        run: npm run test:build
+
+      - name: Zip the macOS app
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent target/release/bundle/macos/Hangar.app Hangar.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hangar-${{ runner.os }}
+          path: |
+            Hangar.zip
+            target/release/bundle/nsis/*.exe
+          if-no-files-found: ignore

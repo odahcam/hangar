@@ -1,5 +1,6 @@
 node_modules/
-build/
+target/
+app/gen/
 .DS_Store
 test-results/
 playwright-report/
