@@ -1,6 +1,6 @@
 // The list reacts at once to status changes and reordering, even when the server is slow to answer.
 const { test, expect } = require("@playwright/test");
-const { makeWorld, addSession, cleanup, waitFor } = require("../test/helpers");
+const { DARWIN, makeWorld, addSession, cleanup, waitFor } = require("../test/helpers");
 const { launch } = require("./target");
 
 let w, srv, s, page;
@@ -46,6 +46,8 @@ test("the arrows reorder immediately and the order is saved", async () => {
 });
 
 test("dragging reorders immediately", async () => {
+  // The tiles arrive after the list and push it down; wait for them so the drag starts on a row that stays put.
+  await expect(page.locator("#tiles .tile")).toHaveCount(DARWIN ? 7 : 6);
   await rowOf(page, "Charlie").locator(".rank").hover();
   await page.mouse.down();
   await rowOf(page, "Alpha").hover();

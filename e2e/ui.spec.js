@@ -55,6 +55,8 @@ test("the arrows reorder sessions", async () => {
 
 test("dragging a row onto another places it before that row", async () => {
   // Step by step (two hovers so the target sees dragover) instead of dragTo, which is flaky for HTML5 drag under load.
+  // The tiles first: they arrive after the list and push it down, which would move the row out from under the drag.
+  await expect(page.locator("#tiles .tile")).toHaveCount(DARWIN ? 7 : 6);
   await rowOf(page, "Blog migration").locator(".rank").hover();
   await page.mouse.down();
   await rowOf(page, "Rate limiter").hover();
