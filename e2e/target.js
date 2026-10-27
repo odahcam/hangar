@@ -60,14 +60,26 @@ async function launchDesktop(w, env) {
     if (!stopping) console.error(`app exited (${code}) mid-test:\n` + fs.readFileSync(path.join(w.root, "app.log"), "utf8").slice(-2000));
   });
   const portFile = path.join(profile, "EBWebView", "DevToolsActivePort");
-  const browser = await waitFor(async () => {
-    if (exited) throw new Error(`${APP} exited before its webview came up`);
-    let port;
-    try { port = fs.readFileSync(portFile, "utf8").split("\n")[0].trim(); } catch { return null; }
-    try { return await chromium.connectOverCDP(`http://127.0.0.1:${port}`); } catch { return null; }
-  }, { timeout: 30000, every: 250 });
-  const page = await waitFor(() => browser.contexts().flatMap((c) => c.pages()).find((p) => p.url().includes("tauri.localhost")), { timeout: 15000 });
-  await page.waitForLoadState("load");
+  let browser, page;
+  try {
+    browser = await waitFor(async () => {
+      if (exited) throw new Error(`${APP} exited before its webview came up`);
+      let port;
+      try { port = fs.readFileSync(portFile, "utf8").split("\n")[0].trim(); } catch { return null; }
+      try { return await chromium.connectOverCDP(`http://127.0.0.1:${port}`); } catch { return null; }
+    }, { timeout: 30000, every: 250 });
+    page = await waitFor(() => browser.contexts().flatMap((c) => c.pages()).find((p) => p.url().includes("tauri.localhost")), { timeout: 15000 });
+    await page.waitForLoadState("load");
+  } catch (e) {
+    // A launch that never comes up still holds the world's files; stop it, and say what it got to.
+    stopping = true;
+    await browser?.close().catch(() => {});
+    await stopApp(proc);
+    fs.closeSync(log);
+    const list = (dir) => { try { return fs.readdirSync(dir).join(", ") || "(empty)"; } catch { return "(missing)"; } };
+    throw new Error(`desktop app did not come up: ${e.message}\nprofile: ${list(profile)}\nprofile/EBWebView: ${list(path.dirname(portFile))}\n`
+      + `app.log:\n${fs.readFileSync(path.join(w.root, "app.log"), "utf8").slice(-2000)}`);
+  }
 
   // The core as the UI calls it, bypassing any slow/fail stand-in a test installed.
   const api = async (method, p, body) => {

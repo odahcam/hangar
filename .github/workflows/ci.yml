@@ -33,8 +33,12 @@ jobs:
       - name: UI e2e, web target
         run: npm run test:e2e
       # WebView2 speaks the DevTools protocol, so on Windows the same specs drive the real desktop app.
+      - name: WebView2 runtime
+        if: runner.os == 'Windows'
+        run: Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue | Select-Object pv, name
       - name: UI e2e, desktop app
         if: runner.os == 'Windows'
+        timeout-minutes: 20
         run: npm run test:desktop
       - name: Packaged app
         run: npm run test:build

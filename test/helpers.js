@@ -182,8 +182,9 @@ async function stopApp(proc) {
 function cleanup(w) {
   for (const c of w.children) c.kill();
   // A webview lets go of its profile a few seconds after its app exits, and Windows locks open files. A world still
-  // locked after that is left to the OS temp cleanup rather than failing the test.
-  try { fs.rmSync(w.root, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 }); }
+  // locked after that is left to the OS temp cleanup rather than failing the test. (The backoff is linear: 10 retries
+  // wait up to ~14s in all; 60 would wait 7.6 minutes.)
+  try { fs.rmSync(w.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }); }
   catch (e) { if (e.code !== "EPERM" && e.code !== "EBUSY") throw e; }
 }
 

@@ -4,3 +4,4 @@ app/gen/
 .DS_Store
 test-results/
 playwright-report/
+.ci-logs/
