@@ -18,7 +18,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 pub(crate) static UUID: LazyLock<Regex> =
@@ -89,7 +89,20 @@ pub struct Hangar {
     db: Mutex<Connection>,
     timing: (Duration, Duration),
     classifying: AtomicBool,
+    runs: Mutex<Runs>,
+    /// Set (and notified) to start the background run now instead of at its next scheduled time.
+    wake: (Mutex<bool>, Condvar),
     platform: &'static dyn platform::Platform,
+}
+
+/// Done detection runs, as ms timestamps: the last one's start and end, and when the background thread runs next.
+#[derive(Default, Clone)]
+struct Runs {
+    last_start: Option<f64>,
+    last_end: Option<f64>,
+    next: Option<f64>,
+    /// Why the last run classified nothing, when it couldn't (e.g. the chosen account is gone).
+    error: Option<String>,
 }
 
 /// An API answer: HTTP-style status and a JSON body ({ error } when status >= 400).
@@ -114,7 +127,8 @@ impl Hangar {
         let backup_dir = cfg.data_dir.join("transcripts");
         std::fs::create_dir_all(&backup_dir).map_err(|e| format!("{}: {e}", backup_dir.display()))?;
         let db = db::open(&cfg.data_dir.join("state.db")).map_err(|e| e.to_string())?;
-        let h = Arc::new(Hangar { claude_dirs: cfg.claude_dirs, discover: cfg.discover, backup_dir, timing: (cfg.classify_start, cfg.classify_every), db: Mutex::new(db), classifying: AtomicBool::new(false), platform: platform::current() });
+        let h = Arc::new(Hangar { claude_dirs: cfg.claude_dirs, discover: cfg.discover, backup_dir, timing: (cfg.classify_start, cfg.classify_every), db: Mutex::new(db), classifying: AtomicBool::new(false),
+            runs: Mutex::default(), wake: (Mutex::new(false), Condvar::new()), platform: platform::current() });
         {
             let db = h.db();
             h.scan_all(&db).and_then(|_| h.seed_done(&db)).and_then(|_| h.scan_all(&db)).map_err(|e| e.to_string())?;
@@ -127,19 +141,59 @@ impl Hangar {
     }
 
     /// Rescans and runs done detection on a thread of its own, paced by Config::classify_start/classify_every.
+    /// `run_now` starts the next run early; the schedule then counts from that run.
     pub fn spawn_background(self: &Arc<Self>) {
         let h = Arc::clone(self);
         let (start, every) = h.timing;
         std::thread::spawn(move || {
-            std::thread::sleep(start);
+            let mut wait = start;
             loop {
+                h.runs.lock().unwrap_or_else(|e| e.into_inner()).next = Some(now_ms() + wait.as_millis() as f64);
+                let woken = h.wake.0.lock().unwrap_or_else(|e| e.into_inner());
+                let (mut woken, _) = h.wake.1.wait_timeout_while(woken, wait, |w| !*w).unwrap_or_else(|e| e.into_inner());
+                *woken = false;
+                drop(woken);
                 if let Err(e) = h.scan_all(&h.db()) {
                     eprintln!("scan: {e}");
                 }
                 h.classify_pending();
-                std::thread::sleep(every);
+                wait = every;
             }
         });
+    }
+
+    fn run_now(&self) -> Value {
+        if self.classifying.load(Ordering::SeqCst) {
+            return json!({ "running": true });
+        }
+        *self.wake.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.wake.1.notify_all();
+        json!({ "started": true })
+    }
+
+    /// When done detection last ran and runs next, for Insights. Timestamps are ISO strings, null before the first run.
+    pub(crate) fn classifier_schedule(&self) -> Value {
+        let r = self.runs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let at = |ms: Option<f64>| ms.map(iso);
+        json!({ "lastStart": at(r.last_start), "lastEnd": at(r.last_end), "next": at(r.next), "error": r.error,
+            "everyMs": self.timing.1.as_millis() as u64, "running": self.classifying.load(Ordering::SeqCst), "account": self.classify_account() })
+    }
+
+    /// Whose Claude login done detection uses: "own" (each session's own account, the default) or one account's dir.
+    /// Chosen in Settings and shown in Insights; never whatever account Hangar happens to run under.
+    fn classify_account(&self) -> String {
+        db::get_meta(&self.db(), "classify_account").ok().flatten().unwrap_or_else(|| "own".into())
+    }
+
+    fn set_classify_account(&self, body: &Value) -> ApiResult {
+        let account = body["account"].as_str().ok_or_else(|| ApiError(400, "account".into()))?;
+        let db = self.db();
+        let account = if account == "own" { account.to_string() } else {
+            let k = accounts::key(std::path::Path::new(account));
+            self.dirs_in(&db).iter().any(|d| accounts::key(d) == k).then_some(k).ok_or_else(|| ApiError(400, "unknown_account".into()))?
+        };
+        db::set_meta(&db, "classify_account", &account)?;
+        Ok(json!({ "ok": true }))
     }
 
     // --- done suggestions: closed, pending sessions idle for 1h+ are classified once per transcript state.
@@ -147,6 +201,22 @@ impl Hangar {
         if self.classifying.swap(true, Ordering::SeqCst) {
             return;
         }
+        let started = now_ms();
+        let finish = |error: Option<String>| {
+            let mut r = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+            (r.last_start, r.last_end, r.error) = (Some(started), Some(now_ms()), error);
+            drop(r);
+            self.classifying.store(false, Ordering::SeqCst);
+        };
+        let visible = self.dirs();
+        // A chosen account that is gone or hidden stops the run, visibly, instead of falling back to another login.
+        let mode = self.classify_account();
+        let fixed = if mode == "own" { None } else {
+            match visible.iter().find(|d| accounts::key(d) == mode) {
+                Some(d) => Some(d.clone()),
+                None => return finish(Some("classifier_account_missing".into())),
+            }
+        };
         let live = self.live_sessions();
         let cutoff = iso(now_ms() - HOUR);
         let transcripts = db::all_t(&self.db()).unwrap_or_default();
@@ -161,9 +231,12 @@ impl Hangar {
             if !eligible().unwrap_or(false) {
                 continue;
             }
+            // A hidden account's sessions aren't classified under their own (hidden) login.
+            let file = PathBuf::from(&t.file);
+            let Some(account) = fixed.clone().or_else(|| sessions::config_dir(&file).filter(|d| visible.iter().any(|v| accounts::key(v) == accounts::key(d))).map(PathBuf::from)) else { continue };
             let at = iso(now_ms());
             // The lock is not held while Haiku thinks: the UI stays responsive.
-            let result = classify::classify(&PathBuf::from(&t.file));
+            let result = classify::classify(&file, &account);
             let db = self.db();
             let v = match &result {
                 Ok(v) => db::Verdict { id: t.id.clone(), offset: t.offset, done: v.done, confidence: v.confidence, evidence: v.evidence.clone(), reason: v.reason.clone(),
@@ -180,7 +253,7 @@ impl Hangar {
                 }
             }
         }
-        self.classifying.store(false, Ordering::SeqCst);
+        finish(None);
     }
 
     /// The whole API. `path` has no query string; `body` is the raw request body ("" for none).
@@ -208,6 +281,9 @@ impl Hangar {
             ("GET", "sessions") => return self.list_sessions().map(Value::from),
             ("GET", "insights") => return self.insights(),
             ("POST", "close-idle-tabs") => return Ok(self.close_idle_tabs()),
+            ("POST", "classify") => return Ok(self.run_now()),
+            ("GET", "classifier") => return Ok(self.classifier_schedule()),
+            ("PATCH", "classifier") => return self.set_classify_account(&parse()?),
             ("GET", "accounts") => return self.list_accounts().map(Value::from),
             ("POST", "accounts") => return self.add_account(&parse()?),
             ("PATCH", "account") => return self.update_account(&parse()?),

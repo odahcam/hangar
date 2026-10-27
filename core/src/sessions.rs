@@ -16,7 +16,7 @@ pub(crate) struct Live {
 }
 
 /// The config directory a transcript lives in: <dir>/projects/<slug>/<id>.jsonl.
-fn config_dir(file: &Path) -> Option<&Path> {
+pub(crate) fn config_dir(file: &Path) -> Option<&Path> {
     file.parent()?.parent().filter(|p| p.file_name().is_some_and(|n| n == "projects"))?.parent()
 }
 

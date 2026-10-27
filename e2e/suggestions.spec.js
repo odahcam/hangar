@@ -36,6 +36,17 @@ test("a dismissed suggestion disappears", async ({ page: browserPage }) => {
   await expect(page.locator("#list li")).toHaveCount(1);
 });
 
+test("Check for done now runs detection without waiting for the schedule", async ({ page: browserPage }) => {
+  setVerdicts(w, [{ verdict: { done: true, confidence: 0.72, evidence: "we're done here", reason: "The user closed it." } }]);
+  srv = await launch(w, { HANGAR_CLASSIFY_START_MS: "3600000" });
+  page = await srv.open(browserPage);
+  await expect(page.locator(".suggest")).toHaveCount(0);
+  await page.getByRole("button", { name: "Check for done now" }).click();
+  await expect(page.locator(".suggest")).toContainText("Looks done (72%)");
+  await page.locator("#tabs").getByRole("button", { name: "Insights" }).click();
+  await expect(page.locator(".panel", { hasText: "Done detection" })).toContainText("last run");
+});
+
 test("an auto-marked session explains itself in the Done tab and can be reopened", async ({ page: browserPage }) => {
   await openWithSuggestion(browserPage, 0.95);
   await page.locator("#tabs").getByRole("button", { name: "Done" }).click();

@@ -1,7 +1,7 @@
 // Done detection: which sessions get classified, and what each verdict does (through a fake `claude`).
 const { test, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
-const { makeWorld, addSession, appendTurns, addLive, setVerdicts, calls, startServer, cleanup, waitFor } = require("./helpers");
+const { makeWorld, addAccount, addSession, appendTurns, addLive, setVerdicts, calls, startServer, cleanup, waitFor } = require("./helpers");
 
 let w, srv;
 beforeEach(() => { w = makeWorld(); });
@@ -159,4 +159,54 @@ test("insights count classifications and their cost", async () => {
   assert.equal(totals.classified, 1);
   assert.equal(totals.suggestions, 1);
   assert.equal(totals.classifyCostUsd, 0.001);
+});
+
+test("by default each session is classified under its own account's login", async () => {
+  const personal = addAccount(w, "claude-personal");
+  addSession(w, { turns: [{ user: "team: we're done here" }] });
+  addSession(w, { claude: personal, turns: [{ user: "personal: we're done here" }] });
+  setVerdicts(w, [{ verdict: verdict(false, 0.5) }]);
+  srv = await startServer(w, FAST);
+  await classified(2);
+  const under = (prefix) => calls(w, "claude").find((c) => c.stdin.includes(prefix)).config;
+  assert.equal(under("team:"), w.claude);
+  assert.equal(under("personal:"), personal);
+  assert.equal((await srv.api("GET", "/api/classifier")).json.account, "own");
+});
+
+test("done detection can run every session under one chosen account; a chosen account that is gone stops it", async () => {
+  const personal = addAccount(w, "claude-personal");
+  addSession(w, { turns: [{ user: "team: we're done here" }] });
+  setVerdicts(w, [{ verdict: verdict(false, 0.5) }]);
+  srv = await startServer(w, { HANGAR_CLASSIFY_START_MS: "3600000" });
+  assert.equal((await srv.api("PATCH", "/api/classifier", { account: "/nope" })).status, 400);
+  assert.deepEqual((await srv.api("PATCH", "/api/classifier", { account: personal })).json, { ok: true });
+  await srv.api("POST", "/api/classify");
+  await classified();
+  assert.equal(calls(w, "claude")[0].config, personal);
+
+  await srv.api("DELETE", "/api/account", { dir: personal });
+  addSession(w, { turns: [{ user: "another" }] });
+  await srv.api("POST", "/api/classify");
+  const c = await waitFor(async () => { const x = (await srv.api("GET", "/api/classifier")).json; return x.error && x; });
+  assert.equal(c.error, "classifier_account_missing");
+  assert.equal(calls(w, "claude").length, 1, "nothing ran under another login");
+});
+
+test("insights show when done detection runs next, and when it last ran", async () => {
+  closing();
+  setVerdicts(w, [{ verdict: verdict(false, 0.5) }]);
+  srv = await startServer(w, { HANGAR_CLASSIFY_START_MS: "3600000", HANGAR_CLASSIFY_EVERY_MS: "600000" });
+  const before = (await srv.api("GET", "/api/insights")).json.classifier;
+  assert.equal(before.lastStart, null);
+  assert.equal(before.everyMs, 600000);
+  const next = new Date(before.next) - Date.now();
+  assert.ok(next > 3500e3 && next <= 3600e3, `next in ${next}ms`);
+
+  assert.deepEqual((await srv.api("POST", "/api/classify")).json, { started: true });
+  await classified();
+  const after = await waitFor(async () => { const c = (await srv.api("GET", "/api/insights")).json.classifier; return c.lastEnd && c; });
+  assert.ok(after.lastStart <= after.lastEnd);
+  const again = new Date(after.next) - Date.now();
+  assert.ok(again > 590e3 && again <= 600e3, "the schedule counts from the run that was asked for");
 });

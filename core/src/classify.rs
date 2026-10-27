@@ -132,7 +132,9 @@ pub fn excerpt(file: &Path) -> std::io::Result<Vec<(&'static str, String)>> {
         .collect())
 }
 
-fn ask_haiku(prompt: &str) -> Result<(Value, Option<f64>), String> {
+/// `account` is the config dir whose login pays for the call: always explicit, never whatever the environment has.
+/// ~/.claude goes with CLAUDE_CONFIG_DIR cleared, as on resume (see accounts.rs).
+fn ask_haiku(prompt: &str, account: &Path) -> Result<(Value, Option<f64>), String> {
     let bin = claude_bin().ok_or("claude_cli_not_found")?;
     let schema = schema().to_string();
     let args = [
@@ -141,6 +143,11 @@ fn ask_haiku(prompt: &str) -> Result<(Value, Option<f64>), String> {
     ];
     let mut cmd = command(bin);
     cmd.args(args).current_dir(std::env::temp_dir());
+    if crate::accounts::is_default(account) {
+        cmd.env_remove("CLAUDE_CONFIG_DIR");
+    } else {
+        cmd.env("CLAUDE_CONFIG_DIR", account);
+    }
     let out = run_with(&mut cmd, Some(prompt), Duration::from_secs(180));
     if !out.ok {
         let tail: String = if out.err.trim().is_empty() { out.out.trim().to_string() } else { out.err.trim().to_string() };
@@ -156,7 +163,7 @@ fn ask_haiku(prompt: &str) -> Result<(Value, Option<f64>), String> {
     Ok((verdict, res["total_cost_usd"].as_f64()))
 }
 
-pub fn classify(file: &PathBuf) -> Result<Outcome, String> {
+pub fn classify(file: &PathBuf, account: &Path) -> Result<Outcome, String> {
     let turns = excerpt(file).map_err(|e| e.to_string())?;
     if !turns.iter().any(|(r, _)| *r == "USER") {
         return Ok(Outcome { done: false, confidence: 1.0, evidence: String::new(), reason: "no user messages".into(), quoted: false, auto_done: false, cost_usd: Some(0.0) });
@@ -165,7 +172,7 @@ pub fn classify(file: &PathBuf) -> Result<Outcome, String> {
         "Conversation (oldest → newest):\n\n{}",
         turns.iter().map(|(r, t)| format!("[{r}] {t}")).collect::<Vec<_>>().join("\n\n")
     );
-    let (v, cost_usd) = ask_haiku(&prompt)?;
+    let (v, cost_usd) = ask_haiku(&prompt, account)?;
     let done = v["done"].as_bool().unwrap_or(false);
     let confidence = v["confidence"].as_f64().unwrap_or(0.0);
     let evidence = v["evidence"].as_str().unwrap_or("").to_string();
