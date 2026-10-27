@@ -26,12 +26,23 @@ function makeWorld() {
     verdicts: path.join(root, "verdicts.json"),
     children: [],
   };
+  w.accounts = [w.claude];
   fs.mkdirSync(path.join(w.claude, "projects"), { recursive: true });
   fs.mkdirSync(path.join(w.claude, "sessions"));
   fs.writeFileSync(w.log, "");
   fs.writeFileSync(w.tabs, "");
   fs.writeFileSync(w.verdicts, "[]");
   return w;
+}
+
+// Another account: a config dir of its own, which the server scans next to w.claude (unless `scanned` is false,
+// for a folder the user adds by hand).
+function addAccount(w, name, { scanned = true } = {}) {
+  const dir = path.join(w.root, name);
+  fs.mkdirSync(path.join(dir, "projects"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "sessions"));
+  if (scanned) w.accounts.push(dir);
+  return dir;
 }
 
 // Builds transcript records the way Claude Code writes them.
@@ -46,9 +57,9 @@ function assistantRec(s, text, at, usage = {}, msgId = "msg_" + crypto.randomByt
 }
 
 // turns: [{ user: "text" } | { assistant: "text", usage } | { raw: record }], spread over time ending at `endAgo`.
-function addSession(w, { id = crypto.randomUUID(), cwd = "/work/acme/app", branch = "main", agentName, aiTitle, turns = [], endAgo = 2 * HOUR } = {}) {
-  const s = { id, cwd, branch };
-  const dir = path.join(w.claude, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
+function addSession(w, { id = crypto.randomUUID(), claude = w.claude, cwd = "/work/acme/app", branch = "main", agentName, aiTitle, turns = [], endAgo = 2 * HOUR } = {}) {
+  const s = { id, cwd, branch, claude };
+  const dir = path.join(claude, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, id + ".jsonl");
   const lines = [];
@@ -75,7 +86,7 @@ function appendTurns(session, turns) {
 function addLive(w, session) {
   const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 600e3)"], { stdio: "ignore" });
   w.children.push(child);
-  fs.writeFileSync(path.join(w.claude, "sessions", child.pid + ".json"),
+  fs.writeFileSync(path.join(session.claude ?? w.claude, "sessions", child.pid + ".json"),
     JSON.stringify({ pid: child.pid, sessionId: session.id, cwd: session.cwd }));
   return child;
 }
@@ -105,7 +116,7 @@ async function startServer(w, env = {}) {
     env: {
       ...process.env,
       HANGAR_PORT: "0",
-      HANGAR_CLAUDE_DIR: w.claude,
+      HANGAR_CLAUDE_DIRS: w.accounts.join(path.delimiter),
       HANGAR_DATA_DIR: w.data,
       HANGAR_WEB_DIR: path.join(ROOT, "web"),
       HANGAR_OSASCRIPT: path.join(BIN, "osascript.js"),
@@ -198,4 +209,4 @@ async function waitFor(fn, { timeout = 10000, every = 100 } = {}) {
   }
 }
 
-module.exports = { stopApp, ROOT, BIN, HOUR, DAY, DARWIN, WIN32, resumed, ago, makeWorld, addSession, appendTurns, addLive, setTabs, setVerdicts, calls, startServer, cleanup, waitFor };
+module.exports = { stopApp, ROOT, BIN, HOUR, DAY, DARWIN, WIN32, resumed, ago, makeWorld, addAccount, addSession, appendTurns, addLive, setTabs, setVerdicts, calls, startServer, cleanup, waitFor };

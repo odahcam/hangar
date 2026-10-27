@@ -38,8 +38,10 @@ pub trait Platform: Send + Sync {
     fn ttys(&self, pids: &[u32]) -> HashMap<u32, String>;
     /// Brings the tab on `tty` forward; false if there is no such tab.
     fn focus(&self, tty: &str) -> bool;
-    /// Opens `claude --resume <id>` in `cwd`, in a new terminal tab or window.
-    fn open(&self, cwd: &str, id: &str) -> Result<(), String>;
+    /// Opens `claude --resume <id>` in `cwd`, in a new terminal tab or window, under the account whose config dir is
+    /// `config` (CLAUDE_CONFIG_DIR), or the default ~/.claude when None: then CLAUDE_CONFIG_DIR is cleared, since the
+    /// user's shell may export one and setting it to ~/.claude would move .claude.json (see accounts.rs).
+    fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String>;
     /// Exits the shell left in the tab on `tty`, which lets the terminal close it.
     fn exit_tab(&self, tty: &str, only_if_idle: bool);
     /// Memory each pid holds, in MB, measured the way the OS reports what a process costs.

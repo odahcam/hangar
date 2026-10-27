@@ -43,16 +43,28 @@ impl Platform for Windows {
     }
 
     // A new tab in the most recent Windows Terminal window; without Windows Terminal, a console window of its own.
-    // wt splits its command line on ";", so one in the path is escaped.
-    fn open(&self, cwd: &str, id: &str) -> Result<(), String> {
+    // wt splits its command line on ";", so one in the path is escaped. The tab gets the environment of the window
+    // it lands in, not ours, so the account is set by cmd inside the tab: `set X=` with nothing after it clears X.
+    // Unquoted, so a folder with a cmd metacharacter in its path can't be passed through.
+    fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String> {
+        let config_s = config.map(|d| d.to_string_lossy().to_string());
+        if config_s.as_deref().is_some_and(|d| d.contains(['&', '|', '<', '>', '^', '"', '%'])) {
+            return Err("unsupported_path".into());
+        }
         let dir = cwd.replace(';', "\\;");
-        let r = run(&WT, &["-w", "0", "new-tab", "--startingDirectory", &dir, "claude", "--resume", id], Duration::from_secs(8));
+        let cmd = format!("set CLAUDE_CONFIG_DIR={}&& claude --resume {id}", config_s.as_deref().unwrap_or("")).replace(';', "\\;");
+        let r = run(&WT, &["-w", "0", "new-tab", "--startingDirectory", &dir, "cmd", "/c", &cmd], Duration::from_secs(8));
         if !r.missing {
             return Ok(());
         }
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_CONSOLE: u32 = 0x10;
-        Command::new("claude").args(["--resume", id]).current_dir(cwd).creation_flags(CREATE_NEW_CONSOLE).spawn().map(drop).map_err(|e| e.to_string())
+        let mut c = Command::new("claude");
+        match config {
+            Some(d) => c.env("CLAUDE_CONFIG_DIR", d),
+            None => c.env_remove("CLAUDE_CONFIG_DIR"),
+        };
+        c.args(["--resume", id]).current_dir(cwd).creation_flags(CREATE_NEW_CONSOLE).spawn().map(drop).map_err(|e| e.to_string())
     }
 
     fn exit_tab(&self, _: &str, _: bool) {}

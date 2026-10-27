@@ -1,17 +1,36 @@
 // The session list and what the user does to sessions: status, notes, order, resume and close.
+use crate::accounts;
 use crate::db;
 use crate::proc;
 use crate::{iso, now_ms, ApiError, ApiResult, Hangar, UUID};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub(crate) struct Live {
     pub pid: u32,
     pub cwd: Option<String>,
     pub tty: Option<String>,
+}
+
+/// The config directory a transcript lives in: <dir>/projects/<slug>/<id>.jsonl.
+fn config_dir(file: &Path) -> Option<&Path> {
+    file.parent()?.parent().filter(|p| p.file_name().is_some_and(|n| n == "projects"))?.parent()
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for e in fs::read_dir(from)?.flatten() {
+        let (a, b) = (e.path(), to.join(e.file_name()));
+        if e.file_type()?.is_dir() {
+            copy_dir(&a, &b)?;
+        } else {
+            fs::copy(&a, &b)?;
+        }
+    }
+    Ok(())
 }
 
 fn nonempty(s: &Option<String>) -> Option<&str> {
@@ -32,11 +51,10 @@ fn project_root(cwds: &[&str]) -> usize {
 }
 
 impl Hangar {
-    /// Sessions Claude Code registered in <claude>/sessions whose process is still running.
+    /// Sessions Claude Code registered in <claude>/sessions, in any account, whose process is still running.
     pub(crate) fn live_sessions(&self) -> HashMap<String, Live> {
         let mut live = HashMap::new();
-        let Ok(dir) = fs::read_dir(self.claude.join("sessions")) else { return live };
-        for f in dir.flatten() {
+        for f in self.dirs().iter().filter_map(|d| fs::read_dir(d.join("sessions")).ok()).flat_map(|d| d.flatten()) {
             if !f.file_name().to_string_lossy().ends_with(".json") {
                 continue;
             }
@@ -57,11 +75,14 @@ impl Hangar {
     }
 
     pub(crate) fn list_sessions(&self) -> ApiResult<Vec<Value>> {
-        let (states, verdicts, transcripts) = {
+        let (states, verdicts, mut transcripts, copies, accounts) = {
             let db = self.db();
-            self.scan_all(&db)?;
-            (db::all_s(&db)?, db::all_v(&db)?, db::all_t(&db)?)
+            let copies = self.scan_all(&db)?;
+            (db::all_s(&db)?, db::all_v(&db)?, db::all_t(&db)?, copies, self.accounts_in(&db)?)
         };
+        let account_of = |file: &str| accounts.iter().find(|a| Path::new(file).starts_with(&a.dir));
+        // A hidden account's sessions leave the list with it; one whose folder is no longer an account stays, unattributed.
+        transcripts.retain(|t| !account_of(&t.file).is_some_and(|a| a.hidden));
         let (live, tabs) = std::thread::scope(|s| {
             let tabs = s.spawn(|| self.platform.tabs());
             (self.live_sessions(), tabs.join().unwrap_or_default())
@@ -98,8 +119,11 @@ impl Hangar {
                     }
                     o
                 });
+                let also_in: Vec<&str> = copies.get(&t.id).into_iter().flatten().filter_map(|f| account_of(&f.to_string_lossy())).map(|a| a.key.as_str()).collect();
                 json!({
                     "id": t.id,
+                    "account": account_of(&t.file).map(|a| a.key.as_str()),
+                    "alsoIn": also_in,
                     "title": title,
                     "aiTitle": t.ai_title,
                     "project": project,
@@ -161,8 +185,63 @@ impl Hangar {
         }
         let home = crate::home();
         let cwd = nonempty(&t.cwd).map(String::from).unwrap_or_else(|| home.to_string_lossy().into());
-        self.platform.open(&cwd, id).map_err(|e| ApiError(500, e))?;
+        let config = config_dir(file).filter(|d| !accounts::is_default(d));
+        self.platform.open(&cwd, id, config).map_err(|e| ApiError(500, e))?;
         Ok(json!({ "opened": true }))
+    }
+
+    /// Copies a session into another account: its transcript, its subagent/tool-result folder, file history and
+    /// session env, all keyed by the same id, so notes, status and order stay with it. `remove` deletes the source
+    /// afterwards. A running session is refused (it keeps writing where it started), and so is a target whose copy
+    /// has moved on since: that would throw away its newer turns.
+    pub(crate) fn transfer(&self, id: &str, body: &Value) -> ApiResult {
+        let to = body["to"].as_str().ok_or_else(|| ApiError(400, "to".into()))?;
+        let remove = body["remove"].as_bool().unwrap_or(false);
+        let db = self.db();
+        let t = db::get_t(&db, id)?.ok_or_else(|| ApiError(404, "unknown_session".into()))?;
+        let target = self.accounts_in(&db)?.into_iter().find(|a| a.key == accounts::key(Path::new(to)) && !a.hidden).ok_or_else(|| ApiError(400, "unknown_account".into()))?;
+        let file = PathBuf::from(&t.file);
+        let source = config_dir(&file).ok_or_else(|| ApiError(500, "unknown_layout".into()))?;
+        if accounts::key(source) == target.key {
+            return Err(ApiError(400, "same_account".into()));
+        }
+        drop(db);
+        if self.live_sessions().contains_key(id) {
+            return Err(ApiError(409, "open".into()));
+        }
+        let saved = self.backup_dir.join(format!("{id}.jsonl"));
+        let from = if file.exists() { file.clone() } else if saved.exists() { saved } else { return Err(ApiError(410, "transcript_gone".into())) };
+        let slug = file.parent().and_then(Path::file_name).ok_or_else(|| ApiError(500, "unknown_layout".into()))?;
+        let dest_dir = target.dir.join("projects").join(slug);
+        let dest = dest_dir.join(format!("{id}.jsonl"));
+        let mtime = |p: &Path| fs::metadata(p).map_or(0.0, |m| crate::scan::mtime_ms(&m));
+        if dest.exists() && mtime(&dest) > mtime(&from) {
+            return Err(ApiError(409, "newer_in_target".into()));
+        }
+        let io = |e: std::io::Error| ApiError(500, e.to_string());
+        fs::create_dir_all(&dest_dir).map_err(io)?;
+        fs::copy(&from, &dest).map_err(io)?;
+        let src_dir = file.parent().unwrap();
+        let extras = [(src_dir.join(id), dest_dir.join(id)), (source.join("file-history").join(id), target.dir.join("file-history").join(id)),
+            (source.join("session-env").join(id), target.dir.join("session-env").join(id))];
+        for (a, b) in &extras {
+            if a.is_dir() {
+                copy_dir(a, b).map_err(io)?;
+            }
+        }
+        // The copy is the session from now on, even where its mtime ties with the source (see scan_all).
+        let db = self.db();
+        if let (Some(mut row), Ok(meta)) = (db::get_t(&db, id)?, fs::metadata(&dest)) {
+            (row.file, row.mtime) = (dest.to_string_lossy().into(), crate::scan::mtime_ms(&meta));
+            db::put_t(&db, &row)?;
+        }
+        if remove {
+            let _ = fs::remove_file(&file);
+            for (a, _) in &extras {
+                let _ = fs::remove_dir_all(a);
+            }
+        }
+        Ok(json!({ "account": target.key, "removed": remove }))
     }
 
     pub(crate) fn close(&self, id: &str) -> ApiResult {

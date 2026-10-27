@@ -26,12 +26,13 @@ struct LoginItem(CheckMenuItem<Wry>);
 fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, CheckMenuItem<Wry>)> {
     let login = CheckMenuItem::with_id(app, "login", "Open at Login", true, false, None::<&str>)?;
     let reload = MenuItem::with_id(app, "reload", "Reload", true, Some("CmdOrCtrl+R"))?;
+    let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
     let sep = || PredefinedMenuItem::separator(app);
     let view = Submenu::with_items(app, "View", true, &[&reload])?;
     #[cfg(target_os = "macos")]
     let menu = {
         let hangar = Submenu::with_items(app, "Hangar", true, &[
-            &PredefinedMenuItem::about(app, Some("About Hangar"), None)?, &sep()?, &login, &sep()?,
+            &PredefinedMenuItem::about(app, Some("About Hangar"), None)?, &sep()?, &settings, &login, &sep()?,
             &PredefinedMenuItem::hide(app, Some("Hide Hangar"))?, &PredefinedMenuItem::quit(app, Some("Quit Hangar"))?,
         ])?;
         // Without an Edit menu, copy/paste/select-all shortcuts do nothing inside the web view.
@@ -46,7 +47,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, CheckMenuItem<Wry>)>
     // WebView2 handles the editing shortcuts itself; the menu bar only carries what has no other home.
     #[cfg(not(target_os = "macos"))]
     let menu = {
-        let hangar = Submenu::with_items(app, "Hangar", true, &[&login, &sep()?, &PredefinedMenuItem::quit(app, Some("Quit"))?])?;
+        let hangar = Submenu::with_items(app, "Hangar", true, &[&settings, &login, &sep()?, &PredefinedMenuItem::quit(app, Some("Quit"))?])?;
         Menu::with_items(app, &[&hangar, &view])?
     };
     Ok((menu, login))
@@ -95,6 +96,14 @@ fn main() {
             "reload" => {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.eval("location.reload()");
+                }
+            }
+            // Settings is a view of the page (web/index.html), the same one its header button opens.
+            "settings" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                    let _ = w.eval("showView('settings')");
                 }
             }
             _ => {}

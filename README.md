@@ -53,7 +53,8 @@ Resume opens the session in a new [Windows Terminal](https://aka.ms/terminal) ta
 ## What it does
 
 - **Pending and Done lists** with every session in `~/.claude` (or `$CLAUDE_CONFIG_DIR`): status (to resume, in progress, done), drag-to-reorder priority, notes, and which ones are open right now.
-- **Resume, go to tab, close**: opens a closed session in a new terminal tab, jumps to the tab of an open one (macOS), or closes it.
+- **Several accounts**: every `~/.claude` and `~/.claude-*` folder is an account, plus any config folder you add in Settings (⚙, or Hangar → Settings…). Each session shows its account, the list filters by account, and accounts can be renamed, recolored or hidden. A session started with the wrong account can be copied or moved to another one, notes and status included.
+- **Resume, go to tab, close**: opens a closed session in a new terminal tab under its own account, jumps to the tab of an open one (macOS), or closes it.
 - **Transcript backup**: copies the transcripts of pending sessions into Hangar's data folder, so Claude Code's automatic cleanup can't delete them.
 - **Done detection**: once a session has been closed for an hour, Claude Haiku reads its last messages. If it looks finished, you get a suggestion to confirm or dismiss. When it is at least 90% sure and can quote you saying so, it marks the session done by itself, and one click reopens it.
 - **Insights**: how much RAM each open session holds, what's pending per project and for how long, prompts per day, longest and costliest sessions.

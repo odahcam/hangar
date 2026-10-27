@@ -44,7 +44,7 @@ test("resuming a closed session opens a new Terminal tab with claude --resume in
   const r = await srv.api("POST", `/api/resume/${s.id}`);
   assert.deepEqual(r.json, { opened: true });
   const script = calls(w, "osascript").map((c) => c.script).find((x) => x.includes("do script"));
-  assert.ok(script.includes(`cd '/work/it'\\\\''s here' && claude --resume ${s.id}`), script);
+  assert.ok(script.includes(`cd '/work/it'\\\\''s here' && CLAUDE_CONFIG_DIR='${w.claude}' claude --resume ${s.id}`), script);
 });
 
 test("resuming a live session focuses its tab instead of opening another", { skip: !DARWIN }, async () => {
@@ -141,7 +141,8 @@ test("on Windows resuming a closed session opens a Windows Terminal tab in its c
   srv = await startServer(w);
   const r = await srv.api("POST", `/api/resume/${s.id}`);
   assert.deepEqual(r.json, { opened: true });
-  assert.deepEqual(calls(w, "wt")[0].args, ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`, "claude", "--resume", s.id]);
+  assert.deepEqual(calls(w, "wt")[0].args, ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`, "cmd", "/c",
+    `set CLAUDE_CONFIG_DIR=${w.claude.replaceAll(";", "\\;")}&& claude --resume ${s.id}`]);
   assert.ok(resumed(w, s.id));
 });
 

@@ -35,7 +35,7 @@ impl Platform for Other {
         false
     }
 
-    fn open(&self, _: &str, _: &str) -> Result<(), String> {
+    fn open(&self, _: &str, _: &str, _: Option<&Path>) -> Result<(), String> {
         Err("unsupported_terminal".into())
     }
 

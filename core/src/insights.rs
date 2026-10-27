@@ -61,7 +61,6 @@ impl Hangar {
             p["total"] = json!(p["total"].as_i64().unwrap() + 1);
         }
         by_project.sort_by(|a, b| b["total"].as_i64().cmp(&a["total"].as_i64()));
-
         let live: Vec<&Value> = sessions.iter().filter(|s| !s["live"].is_null()).collect();
         let pids: Vec<u32> = live.iter().filter_map(|s| s["live"]["pid"].as_u64()).map(|p| p as u32).collect();
         let (mem, tabs) = std::thread::scope(|sc| {
