@@ -59,6 +59,40 @@ test("an account can be renamed and recolored; a bad color is refused", async ()
   assert.deepEqual([a.name, a.color], ["Personal", "#aa0000"]);
 });
 
+test("each account's cleanup period is read from and written to its own settings.json, other settings kept", async () => {
+  const personal = addAccount(w, "claude-personal");
+  fs.writeFileSync(path.join(w.claude, "settings.json"), JSON.stringify({ model: "opus", cleanupPeriodDays: 365, hooks: {} }));
+  srv = await startServer(w);
+  const days = async () => (await srv.api("GET", "/api/accounts")).json.map((a) => [a.cleanupDays, a.cleanupSet]);
+  assert.deepEqual(await days(), [[365, true], [30, false]]);
+
+  assert.deepEqual((await srv.api("PATCH", "/api/account", { dir: personal, cleanupDays: 90 })).json, { ok: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(personal, "settings.json"), "utf8")), { cleanupPeriodDays: 90 });
+  await srv.api("PATCH", "/api/account", { dir: w.claude, cleanupDays: 180 });
+  assert.deepEqual(Object.entries(JSON.parse(fs.readFileSync(path.join(w.claude, "settings.json"), "utf8"))),
+    [["model", "opus"], ["cleanupPeriodDays", 180], ["hooks", {}]]);
+  await srv.api("PATCH", "/api/account", { dir: w.claude, cleanupDays: null });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(w.claude, "settings.json"), "utf8")), { model: "opus", hooks: {} });
+  assert.deepEqual(await days(), [[30, false], [90, true]]);
+
+  assert.equal((await srv.api("PATCH", "/api/account", { dir: personal, cleanupDays: 0 })).status, 400);
+  fs.writeFileSync(path.join(personal, "settings.json"), "{ not json");
+  assert.equal((await srv.api("PATCH", "/api/account", { dir: personal, cleanupDays: 10 })).status, 409);
+  assert.equal(fs.readFileSync(path.join(personal, "settings.json"), "utf8"), "{ not json");
+});
+
+test("transcripts expire by their own account's cleanup period", async () => {
+  const personal = addAccount(w, "claude-personal");
+  fs.writeFileSync(path.join(w.claude, "settings.json"), JSON.stringify({ cleanupPeriodDays: 365 }));
+  const old = (claude) => { const s = addSession(w, { claude, turns: [{ user: "a" }] }); const t = (Date.now() - 25 * 864e5) / 1000; fs.utimesSync(s.file, t, t); return s; };
+  old(w.claude);
+  const expiring = old(personal);
+  srv = await startServer(w);
+  const { storage } = (await srv.api("GET", "/api/insights")).json;
+  assert.deepEqual(storage.expiringSoon.map((x) => [x.id, x.account]), [[expiring.id, personal]]);
+  assert.deepEqual(storage.accounts.map((a) => [a.dir, a.cleanupDays]), [[w.claude, 365], [personal, 30]]);
+});
+
 test("hiding an account takes its sessions off the list until it is shown again", async () => {
   const personal = addAccount(w, "claude-personal");
   const s = addSession(w, { claude: personal, turns: [{ user: "a" }] });

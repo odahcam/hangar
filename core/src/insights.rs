@@ -82,13 +82,18 @@ impl Hangar {
             })
             .collect();
 
-        let retention = 365.0 * DAY;
+        // Each account's own cleanupPeriodDays decides when Claude Code deletes its transcripts.
+        let accounts = self.list_accounts()?;
+        let retention = |s: &Value| -> f64 {
+            let days = accounts.iter().find(|a| a["dir"] == s["account"]).and_then(|a| a["cleanupDays"].as_u64()).unwrap_or(crate::accounts::DEFAULT_CLEANUP_DAYS);
+            days as f64 * DAY
+        };
         let top = |key: &str| -> Vec<Value> {
             let mut v: Vec<&Value> = sessions.iter().collect();
             v.sort_by(|a, b| num(&b[key]).total_cmp(&num(&a[key])));
             v.into_iter()
                 .take(10)
-                .map(|s| json!({ "id": s["id"], "title": s["title"], "project": s["project"], "prompts": s["prompts"],
+                .map(|s| json!({ "id": s["id"], "account": s["account"], "title": s["title"], "project": s["project"], "prompts": s["prompts"],
                     "tokensIn": s["tokensIn"], "tokensCache": s["tokensCache"], "tokensOut": s["tokensOut"], "status": s["status"] }))
                 .collect()
         };
@@ -98,13 +103,13 @@ impl Hangar {
             let db = self.db();
             (db::all_v(&db)?, db::activity_since(&db, &since)?)
         };
-        let brief = |s: &Value| json!({ "id": s["id"], "title": s["title"] });
+        let brief = |s: &Value| json!({ "id": s["id"], "account": s["account"], "title": s["title"] });
         let mut live_rows: Vec<Value> = live
             .iter()
             .map(|s| {
                 let pid = s["live"]["pid"].as_u64().unwrap_or(0) as u32;
                 let idle = s["lastAt"].as_str().and_then(parse_ms).map(|t| ((now - t) / 36e5).round());
-                json!({ "id": s["id"], "title": s["title"], "tty": s["live"]["tty"], "mb": mem.get(&pid).copied().unwrap_or(0),
+                json!({ "id": s["id"], "account": s["account"], "title": s["title"], "tty": s["live"]["tty"], "mb": mem.get(&pid).copied().unwrap_or(0),
                     "idleHours": idle, "status": s["status"] })
             })
             .collect();
@@ -139,12 +144,20 @@ impl Hangar {
             "topTokens": top("tokensOut"),
             "storage": {
                 "transcriptsMb": (sessions.iter().map(|s| num(&s["size"])).sum::<f64>() / 1048576.0).round(),
+                // Per account that isn't hidden, in listing order.
+                "accounts": accounts.iter().filter(|a| a["hidden"] != true).map(|a| json!({
+                    "dir": a["dir"],
+                    "transcriptsMb": (sessions.iter().filter(|s| s["account"] == a["dir"] && s["transcript"] == true).map(|s| num(&s["size"])).sum::<f64>() / 1048576.0).round(),
+                    "cleanupDays": a["cleanupDays"],
+                })).collect::<Vec<_>>(),
                 "backupMb": (backup_bytes as f64 / 1048576.0).round(),
                 "pendingWithoutBackup": pend.iter().filter(|s| s["backedUp"] != true).map(|s| brief(s)).collect::<Vec<_>>(),
-                "expiringSoon": sessions.iter().filter(|s| s["transcript"] == true && num(&s["mtime"]) + retention - now < 30.0 * DAY)
-                    .map(|s| json!({ "id": s["id"], "title": s["title"], "expiresAt": iso(num(&s["mtime"]) + retention), "backedUp": s["backedUp"] }))
+                // A week ahead: with Claude Code's 30-day default a 30-day window would list nearly everything.
+                "expiringSoon": sessions.iter().filter(|s| s["transcript"] == true && num(&s["mtime"]) + retention(s) - now < 7.0 * DAY)
+                    .map(|s| json!({ "id": s["id"], "account": s["account"], "title": s["title"], "expiresAt": iso(num(&s["mtime"]) + retention(s)), "backedUp": s["backedUp"] }))
                     .collect::<Vec<_>>(),
             },
+            "classifier": self.classifier_schedule(),
         }))
     }
 }

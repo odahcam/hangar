@@ -105,6 +105,9 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
 #settings { display: flex; flex-direction: column; gap: 12px; align-items: stretch; }
 #settings > div:first-child { align-self: flex-start; }
 #settingsBtn[aria-pressed=true] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.accts input[type=number] { width: 64px; font: 12px var(--sans); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
+.accts .keep { font-size: 12px; color: var(--muted); }
 .acct { border: 1px solid currentColor; border-radius: 4px; padding: 0 6px; }
 .transfer { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; margin: 6px 0; }
 .transfer select { font: 12px var(--sans); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
@@ -141,6 +144,7 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
     <select id="proj" data-i18n-label="project"></select>
     <label class="btn"><input type="checkbox" id="liveOnly"> <span data-i18n="openOnly"></span></label>
     <label class="btn"><input type="checkbox" id="suggestedOnly"> <span data-i18n="suggestedOnly"></span></label>
+    <button class="btn" id="checkNow" data-i18n="checkNow"></button>
   </div>
   <ol id="list"></ol>
   <div class="empty" id="empty" hidden></div>
@@ -154,7 +158,7 @@ for (const e of document.querySelectorAll("[data-i18n-label]")) e.setAttribute("
 document.querySelector("#locale").value = LOCALE;
 document.querySelector("#locale").onchange = (e) => setLocale(e.target.value);
 const $ = (s) => document.querySelector(s);
-let items = [], accounts = [], view = "pending", dragId = null;
+let items = [], accounts = [], classifier = null, view = "pending", dragId = null;
 // Accounts are only shown once there is more than one to tell apart.
 const shown = () => accounts.filter((a) => !a.hidden);
 const multi = () => shown().length > 1;
@@ -244,12 +248,12 @@ function pendingOrder() { return items.filter((s) => s.status !== "done").sort(b
 function render() {
   const ins = view === "insights", set = view === "settings";
   $("#insights").hidden = !ins; $("#settings").hidden = !set; $("#toolbar").hidden = ins || set; $("#list").hidden = ins || set;
-  $("#tabs").hidden = set; $("#tiles").hidden = set;
+  $("#tabs").hidden = set; $("#tiles").hidden = set; $("#checkNow").hidden = view !== "pending";
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-pressed", b.dataset.v === view);
   $("#settingsBtn").setAttribute("aria-pressed", set);
   if (ins || set) $("#empty").hidden = true;
   if (ins) return loadInsights();
-  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), accountsPanel());
+  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), accountsPanel(), classifierSettings());
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
   const acct = multi() ? $("#acct").value : "";
   const base = view === "pending" ? pendingOrder()
@@ -385,7 +389,33 @@ const tile = (v, k) => el("div", { class: "tile" }, [el("div", { class: "v", tex
 const panel = (title, sub, kids) => el("section", { class: "panel" }, [el("h2", {}, [title, sub ? el("small", { text: sub }) : null]), ...kids]);
 const seg = (n, max, color, tip) => n ? el("span", { style: `width:${(n / max) * 100}%;background:var(${color})`, title: tip }) : null;
 function hbar(label, segs, val, tip) {
-  return el("div", { class: "hbar", title: tip || "" }, [el("span", { class: "lbl", text: label }), el("div", { class: "track" }, segs), el("span", { class: "val", text: val })]);
+  return el("div", { class: "hbar", title: tip || "" }, [el("span", { class: "lbl" }, label), el("div", { class: "track" }, segs), el("span", { class: "val", text: val })]);
+}
+// A dot in the session's account color, once there is more than one account to tell apart.
+function acctDot(dir) {
+  const a = multi() && accountOf(dir);
+  return a ? el("i", { class: "dot", style: `background:${a.color}`, title: a.name }) : null;
+}
+const clock = (iso) => iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+
+// Asks for a done-detection run now and waits for it (or for the one already running) to finish, then reloads
+// with whatever it found. Polls the light /api/classifier, not insights.
+async function checkNow(b) {
+  b.disabled = true; b.setAttribute("aria-busy", "true"); b.textContent = t("checking");
+  try {
+    const before = (await api("GET", "/api/classifier")).lastStart;
+    await api("POST", "/api/classify");
+    const end = Date.now() + 5 * 60e3;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const c = await api("GET", "/api/classifier");
+      if (!c.running && c.lastStart && c.lastStart !== before) break;
+      if (Date.now() > end) throw new Error(t("checkSlow"));
+    }
+    toast(t("checkDone"));
+  } catch (e) { toast(failed(e)); }
+  b.disabled = false; b.removeAttribute("aria-busy"); b.textContent = t("checkNow");
+  await load();
 }
 function legend(entries) { return el("div", { class: "legend" }, entries.map(([c, label]) => el("span", {}, [el("i", { style: `background:var(${c})` }), label]))); }
 
@@ -429,15 +459,53 @@ function accountsPanel() {
     name.onchange = () => save(a, { name: name.value });
     const color = el("input", { type: "color", value: a.color, "aria-label": t("accountColor") });
     color.onchange = () => save(a, { color: color.value });
+    // Empty = Claude Code's default (the key is removed from the account's settings.json).
+    const keep = el("input", { type: "number", min: 1, step: 1, value: a.cleanupSet ? a.cleanupDays : null, placeholder: "30", "aria-label": t("keepDays") });
+    keep.onchange = () => {
+      const v = keep.value.trim() === "" ? null : Math.floor(Number(keep.value));
+      if (v !== null && !(v >= 1)) { keep.value = a.cleanupSet ? a.cleanupDays : ""; return toast(t("failed", { msg: t("err_cleanup_days") })); }
+      mutate(() => Object.assign(a, { cleanupDays: v ?? 30, cleanupSet: v !== null }),
+        () => api("PATCH", "/api/account", { dir: a.dir, cleanupDays: v }), { rerender: false });
+    };
     const toggle = a.hidden ? btn(t("show"), "", () => act(() => api("PATCH", "/api/account", { dir: a.dir, hidden: false })))
       : btn(a.added ? t("remove") : t("hide"), "", () => act(() => api("DELETE", "/api/account", { dir: a.dir })));
     return el("div", { class: "a" + (a.hidden ? " off" : "") }, [color, name,
-      el("div", {}, [el("div", { class: "dir", text: a.dir }), el("div", { class: "meta", text: a.hidden ? t("hiddenL") : t("acctCounts", stats(a.dir)) })]), toggle]);
+      el("div", {}, [el("div", { class: "dir", text: a.dir }), el("div", { class: "meta", text: a.hidden ? t("hiddenL") : t("acctCounts", stats(a.dir)) }),
+        el("label", { class: "keep" }, [t("keepFor") + " ", keep, " " + t("keepUnit")])]), toggle]);
   });
   const input = el("input", { type: "text", placeholder: t("addFolderPlaceholder"), "aria-label": t("addFolder") });
   const form = el("form", {}, [input, el("button", { class: "btn", type: "submit", text: t("addFolder") })]);
   form.onsubmit = (e) => { e.preventDefault(); act(() => api("POST", "/api/accounts", { dir: input.value }), t("folderAdded")); };
   return panel(t("pAccounts"), t("pAccountsSub"), [el("div", { class: "accts" }, [...rows, form])]);
+}
+
+// Whose login pays for done detection, in words: each session's own account, or the one chosen in Settings.
+const classifierWho = (c) => c.account === "own" ? t("ownAccount") : accountOf(c.account)?.name || c.account;
+
+// When done detection last ran and runs next, under which account, with the same Check now as the Pending tab.
+function classifierPanel(c) {
+  const b = btn(t("checkNow"), "", () => checkNow(b));
+  const last = c.running ? t("runningNow") : c.lastEnd
+    ? t("lastRun", { at: clock(c.lastStart), secs: Math.max(1, Math.round((new Date(c.lastEnd) - new Date(c.lastStart)) / 1000)) }) : t("notRunYet");
+  return panel(t("pClassifier"), t("pClassifierSub", { min: Math.round(c.everyMs / 60e3) }), [
+    el("div", { class: "meta" }, [el("span", { text: last }), el("span", { text: t("nextRun", { at: clock(c.next) }) })]),
+    el("div", { class: "meta" }, [acctDot(c.account), t("classifierUnder", { who: classifierWho(c) })]),
+    c.error ? el("div", { class: "warn", text: failed(new Error(c.error)) }) : null,
+    el("div", {}, [b]),
+  ]);
+}
+
+// Settings: which account's login done detection uses. Each session's own is the default; one account can be chosen.
+function classifierSettings() {
+  if (!classifier) return null;
+  const sel = el("select", { "aria-label": t("classifierAccount") }, [el("option", { value: "own", text: t("ownAccount") }),
+    ...shown().map((a) => el("option", { value: a.dir, text: a.name }))]);
+  sel.value = classifier.account;
+  sel.onchange = () => mutate(() => { classifier.account = sel.value; }, () => api("PATCH", "/api/classifier", { account: sel.value }), { rerender: false });
+  return panel(t("pClassifier"), t("pClassifierSettingsSub"), [
+    el("label", { class: "transfer" }, [t("classifierAccount") + " ", sel]),
+    classifier.error ? el("div", { class: "warn", text: failed(new Error(classifier.error)) }) : null,
+  ]);
 }
 
 async function loadInsights() {
@@ -450,7 +518,7 @@ async function loadInsights() {
   const maxMb = Math.max(1, ...m.sessions.map((s) => s.mb));
   const memRows = m.sessions.map((s) => {
     const idle = s.idleHours >= 24;
-    return hbar(`${idle ? "◌ " : ""}${s.title}`, [seg(s.mb, maxMb, idle ? "--age1" : "--s1", `${s.mb} MB`)],
+    return hbar([acctDot(s.account), `${idle ? "◌ " : ""}${s.title}`], [seg(s.mb, maxMb, idle ? "--age1" : "--s1", `${s.mb} MB`)],
       `${s.mb} MB · ${s.idleHours}h`, idle ? t("idleFor", { h: s.idleHours }) : "");
   });
   const idleCount = m.sessions.filter((s) => s.idleHours >= 24).length;
@@ -477,7 +545,7 @@ async function loadInsights() {
 
   const costTable = (rows) => el("div", { class: "scroll" }, [el("table", {}, [
     el("tr", {}, ["colSession", "colProject", "colPrompts", "colIn", "colCache", "colOut"].map((h) => el("th", { text: t(h) }))),
-    ...rows.map((r) => el("tr", {}, [el("td", { text: r.title + (r.status === "done" ? " ✓" : "") }), el("td", { text: r.project }),
+    ...rows.map((r) => el("tr", {}, [el("td", {}, [acctDot(r.account), r.title + (r.status === "done" ? " ✓" : "")]), el("td", { text: r.project }),
       el("td", { class: "n", text: r.prompts }), el("td", { class: "n", text: fmtTok(r.tokensIn) }), el("td", { class: "n", text: fmtTok(r.tokensCache) }), el("td", { class: "n", text: fmtTok(r.tokensOut) })])),
   ])]);
 
@@ -505,11 +573,18 @@ async function loadInsights() {
     panel(t("pCostliest"), t("pCostliestSub"), [costTable(d.topTokens)]),
     el("div", { class: "grid2" }, [
       panel(t("pStorage"), "", [el("div", { class: "tiles" }, [
-        tile(fmtMb(s.transcriptsMb), t("sTranscripts")),
+        // One tile per account, edged in its color: its transcripts and how long Claude Code keeps them.
+        ...s.accounts.map((a) => {
+          const x = tile(fmtMb(a.transcriptsMb), t("sTranscripts", { name: accountOf(a.dir)?.name || a.dir, days: a.cleanupDays }));
+          if (multi()) x.style.borderLeft = `3px solid ${accountOf(a.dir)?.color}`;
+          return x;
+        }),
         tile(fmtMb(s.backupMb), t("sBackup")),
         tile(s.pendingWithoutBackup.length, t("sNoBackup")),
         tile(s.expiringSoon.length, t("sExpiring")),
-      ]), ...s.expiringSoon.map((x) => el("div", { class: x.backedUp ? "" : "warn", text: t("expires", { title: x.title, date: x.expiresAt.slice(0, 10) }) + (x.backedUp ? t("hasBackup") : t("noBackup")) }))]),
+      ]), ...s.expiringSoon.map((x) => el("div", { class: x.backedUp ? "" : "warn" }, [acctDot(x.account),
+        t("expires", { title: x.title, date: x.expiresAt.slice(0, 10) }) + (x.backedUp ? t("hasBackup") : t("noBackup"))]))]),
+      classifierPanel(d.classifier),
       d.idleTabs ? panel(t("pIdleTabs"), t("pIdleTabsSub"), [
         el("div", { class: "meta", text: d.idleTabs.join(" · ") || t("none") }),
         d.idleTabs.length ? el("div", {}, [closeTabs]) : null]) : null,
@@ -518,7 +593,7 @@ async function loadInsights() {
 }
 
 async function load() {
-  try { [items, accounts] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts")]); } catch (e) { $("#counts").textContent = t("serverDown", { msg: e.message }); return; }
+  try { [items, accounts, classifier] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts"), api("GET", "/api/classifier")]); } catch (e) { $("#counts").textContent = t("serverDown", { msg: e.message }); return; }
   const sel = $("#proj"), cur = sel.value;
   sel.replaceChildren(el("option", { value: "", text: t("allProjects") }), ...[...new Set(items.map((s) => s.project).filter(Boolean))].sort().map((p) => el("option", { value: p, text: p })));
   sel.value = cur;
@@ -539,6 +614,7 @@ $("#proj").onchange = render;
 $("#acct").onchange = render;
 $("#liveOnly").onchange = render;
 $("#suggestedOnly").onchange = render;
+$("#checkNow").onclick = (e) => checkNow(e.currentTarget);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && !document.activeElement?.matches("textarea")) load(); });
 load();
 </script>

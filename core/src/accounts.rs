@@ -33,6 +33,36 @@ pub(crate) fn is_default(dir: &Path) -> bool {
     key(dir) == key(&home().join(".claude"))
 }
 
+/// Claude Code deletes an account's transcripts once they are older than its settings.json cleanupPeriodDays.
+pub(crate) const DEFAULT_CLEANUP_DAYS: u64 = 30;
+
+/// The account's cleanupPeriodDays, if its settings.json sets one.
+pub(crate) fn cleanup_days(dir: &Path) -> Option<u64> {
+    let text = fs::read_to_string(dir.join("settings.json")).ok()?;
+    serde_json::from_str::<Value>(&text).ok()?["cleanupPeriodDays"].as_u64()
+}
+
+/// Sets cleanupPeriodDays (None removes it, back to Claude Code's default), keeping every other setting as it was.
+/// An unreadable settings.json is left alone rather than replaced.
+fn set_cleanup_days(dir: &Path, days: Option<u64>) -> ApiResult<()> {
+    let path = dir.join("settings.json");
+    let mut settings = match fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<Value>(&text).ok().filter(Value::is_object).ok_or_else(|| ApiError(409, "settings_unreadable".into()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(e) => return Err(ApiError(500, e.to_string())),
+    };
+    let obj = settings.as_object_mut().unwrap();
+    match days {
+        Some(d) => obj.insert("cleanupPeriodDays".into(), json!(d)),
+        None => obj.remove("cleanupPeriodDays"),
+    };
+    // Written beside it and renamed over it, so Claude Code never reads half a file.
+    let tmp = dir.join("settings.json.hangar-tmp");
+    let io = |e: std::io::Error| ApiError(500, e.to_string());
+    fs::write(&tmp, serde_json::to_string_pretty(&settings).unwrap() + "\n").map_err(io)?;
+    fs::rename(&tmp, &path).map_err(io)
+}
+
 // ~/.claude → "claude", ~/.claude-work → "work", anything else → its folder name.
 fn default_name(dir: &Path) -> String {
     let base = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| key(dir));
@@ -101,7 +131,11 @@ impl Hangar {
         Ok(self
             .accounts_in(&self.db())?
             .into_iter()
-            .map(|a| json!({ "dir": a.key, "name": a.name, "color": a.color, "default": is_default(&a.dir), "added": a.added, "hidden": a.hidden }))
+            .map(|a| {
+                let cleanup = cleanup_days(&a.dir);
+                json!({ "dir": a.key, "name": a.name, "color": a.color, "default": is_default(&a.dir), "added": a.added, "hidden": a.hidden,
+                    "cleanupDays": cleanup.unwrap_or(DEFAULT_CLEANUP_DAYS), "cleanupSet": cleanup.is_some() })
+            })
             .collect())
     }
 
@@ -148,6 +182,14 @@ impl Hangar {
         }
         if let Some(hidden) = body["hidden"].as_bool() {
             row.hidden = hidden;
+        }
+        // cleanupDays lives in the account's own settings.json, where Claude Code reads it; null removes it.
+        if let Some(days) = body.get("cleanupDays") {
+            let days = match days {
+                Value::Null => None,
+                d => Some(d.as_u64().filter(|d| *d >= 1).ok_or_else(|| ApiError(400, "cleanup_days".into()))?),
+            };
+            set_cleanup_days(Path::new(&row.dir), days)?;
         }
         db::put_account(&db, &row)?;
         Ok(json!({ "ok": true }))

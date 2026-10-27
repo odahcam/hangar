@@ -1,6 +1,7 @@
 // Several accounts in the UI: which one a session is in, filtering by it, and moving a session to another.
 const { test, expect } = require("@playwright/test");
 const fs = require("node:fs");
+const path = require("node:path");
 const { makeWorld, addAccount, addSession, cleanup } = require("../test/helpers");
 const { launch } = require("./target");
 
@@ -38,6 +39,28 @@ test("a session started in the wrong account moves to the right one", async () =
   await expect(rowOf(page, "Side project").locator(".acct")).toHaveText("personal");
   expect(fs.existsSync(s.wrong.file)).toBe(false);
   expect((await srv.session(s.wrong.id)).account).toBe(personal);
+});
+
+test("how long each account keeps its transcripts is set in Settings", async () => {
+  await page.getByRole("button", { name: "Settings" }).click();
+  const keep = page.getByRole("spinbutton", { name: "Days to keep transcripts" });
+  await keep.nth(0).fill("365");
+  await keep.nth(0).press("Enter");
+  await keep.nth(1).fill("90");
+  await keep.nth(1).press("Enter");
+  const days = (dir) => { try { return JSON.parse(fs.readFileSync(path.join(dir, "settings.json"), "utf8")).cleanupPeriodDays; } catch { return undefined; } };
+  await expect.poll(() => [days(w.claude), days(personal)]).toEqual([365, 90]);
+});
+
+test("the account done detection runs under is chosen in Settings and shown in Insights", async () => {
+  await page.getByRole("button", { name: "Settings" }).click();
+  const sel = page.getByRole("combobox", { name: "Use the Claude login of" });
+  await expect(sel).toHaveValue("own");
+  await sel.selectOption({ label: "personal" });
+  await expect.poll(async () => (await srv.api("GET", "/api/classifier")).json.account).toBe(personal);
+  await page.getByRole("button", { name: "← Back" }).click();
+  await page.locator("#tabs").getByRole("button", { name: "Insights" }).click();
+  await expect(page.locator("#insights .panel", { hasText: "Done detection" })).toContainText("uses the Claude login of personal");
 });
 
 test("accounts are renamed in Settings", async () => {
