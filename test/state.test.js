@@ -110,7 +110,7 @@ test("requests for another Host are refused (DNS rebinding)", async () => {
   srv = await startServer(w);
   const http = require("node:http");
   const status = await new Promise((resolve) => {
-    http.get({ host: "127.0.0.1", port: srv.port, path: "/api/sessions", headers: { host: "evil.example:80" } }, (res) => resolve(res.statusCode));
+    http.get({ host: "127.0.0.1", port: srv.port, path: "/api/sessions", headers: { host: "evil.example:80" }, agent: false }, (res) => { res.resume(); resolve(res.statusCode); });
   });
   assert.equal(status, 403);
 });
@@ -124,6 +124,6 @@ test("serves the UI files and nothing else", async () => {
   for (const p of ["/i18n.js", "/icon.svg", "/icon-512.png", "/manifest.webmanifest"]) {
     assert.equal((await srv.api("GET", p)).status, 200, p);
   }
-  assert.equal((await srv.api("GET", "/../server/server.js")).status, 404);
+  assert.equal((await srv.api("GET", "/../core/src/lib.rs")).status, 404);
   assert.equal((await srv.api("GET", "/api/nope")).status, 404);
 });

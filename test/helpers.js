@@ -1,5 +1,5 @@
-// Test harness: a throwaway ~/.claude ("world"), fake osascript/claude binaries, and a real server process per test.
-const { spawn } = require("node:child_process");
+// Test harness: a throwaway ~/.claude ("world"), fake osascript/wt/claude binaries, and a real server process per test.
+const { spawn, execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -7,7 +7,11 @@ const path = require("node:path");
 
 const ROOT = path.join(__dirname, "..");
 const BIN = path.join(__dirname, "bin");
+// The core over HTTP (core/src/bin/hangar-server.rs); `npm test` builds it first. HANGAR_SERVER points at another build.
+const SERVER = process.env.HANGAR_SERVER || path.join(ROOT, "target/debug", "hangar-server" + (process.platform === "win32" ? ".exe" : ""));
 const HOUR = 36e5, DAY = 864e5;
+// Terminal features differ per OS (see core/src/platform); tests of one OS's terminal skip on the others.
+const DARWIN = process.platform === "darwin", WIN32 = process.platform === "win32";
 
 const ago = (ms) => new Date(Date.now() - ms).toISOString();
 
@@ -44,7 +48,7 @@ function assistantRec(s, text, at, usage = {}, msgId = "msg_" + crypto.randomByt
 // turns: [{ user: "text" } | { assistant: "text", usage } | { raw: record }], spread over time ending at `endAgo`.
 function addSession(w, { id = crypto.randomUUID(), cwd = "/work/acme/app", branch = "main", agentName, aiTitle, turns = [], endAgo = 2 * HOUR } = {}) {
   const s = { id, cwd, branch };
-  const dir = path.join(w.claude, "projects", cwd.replace(/[/.]/g, "-"));
+  const dir = path.join(w.claude, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, id + ".jsonl");
   const lines = [];
@@ -69,7 +73,7 @@ function appendTurns(session, turns) {
 
 // A "live" session: a real process registered the way Claude Code does in ~/.claude/sessions.
 function addLive(w, session) {
-  const child = spawn("sleep", ["600"], { stdio: "ignore" });
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 600e3)"], { stdio: "ignore" });
   w.children.push(child);
   fs.writeFileSync(path.join(w.claude, "sessions", child.pid + ".json"),
     JSON.stringify({ pid: child.pid, sessionId: session.id, cwd: session.cwd }));
@@ -90,15 +94,23 @@ function calls(w, bin) {
   return fs.readFileSync(w.log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((c) => !bin || c.bin === bin);
 }
 
+// Whether this OS's terminal was asked to run `claude --resume <id>`.
+function resumed(w, id) {
+  return calls(w).some((c) => c.bin === "osascript" ? c.script.includes(`claude --resume ${id}`)
+    : c.bin === "wt" && c.args.join(" ").endsWith(`claude --resume ${id}`));
+}
+
 async function startServer(w, env = {}) {
-  const proc = spawn(process.execPath, [path.join(ROOT, "server/server.js")], {
+  const proc = spawn(SERVER, [], {
     env: {
       ...process.env,
       HANGAR_PORT: "0",
       HANGAR_CLAUDE_DIR: w.claude,
       HANGAR_DATA_DIR: w.data,
-      HANGAR_OSASCRIPT: path.join(BIN, "osascript"),
-      CLAUDE_BIN: path.join(BIN, "claude"),
+      HANGAR_WEB_DIR: path.join(ROOT, "web"),
+      HANGAR_OSASCRIPT: path.join(BIN, "osascript.js"),
+      HANGAR_WT: path.join(BIN, "wt.js"),
+      CLAUDE_BIN: path.join(BIN, "claude.js"),
       FAKE_LOG: w.log,
       FAKE_TABS: w.tabs,
       FAKE_VERDICTS: w.verdicts,
@@ -108,7 +120,8 @@ async function startServer(w, env = {}) {
     },
     stdio: ["ignore", "pipe", "pipe"],
     // Own process group, so stop() also takes down fake binaries the server spawned for in-flight requests.
-    detached: true,
+    // (On Windows `detached` would mean a console window; taskkill /T walks the tree instead.)
+    detached: !WIN32,
   });
   let stderr = "";
   proc.stderr.on("data", (d) => { stderr += d; });
@@ -139,15 +152,40 @@ async function startServer(w, env = {}) {
   async function stop() {
     proc.removeAllListeners("exit");
     const exited = new Promise((r) => proc.once("exit", r));
-    try { process.kill(-proc.pid, "SIGKILL"); } catch {}
+    if (proc.exitCode !== null || proc.signalCode !== null) return;
+    try {
+      if (WIN32) execFileSync("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { stdio: "ignore" });
+      else process.kill(-proc.pid, "SIGKILL");
+    } catch {}
     await exited;
   }
   return { port, base, api, sessions, session, stop, stderr: () => stderr };
 }
 
+// Stops a desktop app process. On Windows it is asked to close first (WM_CLOSE): its webview's browser processes
+// are not its children, so only a clean quit takes them down and frees the profile. Killed if it doesn't comply.
+async function stopApp(proc) {
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  const gone = new Promise((r) => proc.once("exit", r));
+  const kill = (force) => {
+    try {
+      if (WIN32) execFileSync("taskkill", ["/pid", String(proc.pid), "/t", ...(force ? ["/f"] : [])], { stdio: "ignore" });
+      else proc.kill(force ? "SIGKILL" : "SIGTERM");
+    } catch {}
+  };
+  kill(false);
+  const timer = setTimeout(() => kill(true), 5000);
+  await gone;
+  clearTimeout(timer);
+}
+
 function cleanup(w) {
   for (const c of w.children) c.kill();
-  fs.rmSync(w.root, { recursive: true, force: true });
+  // A webview lets go of its profile a few seconds after its app exits, and Windows locks open files. A world still
+  // locked after that is left to the OS temp cleanup rather than failing the test. (The backoff is linear: 10 retries
+  // wait up to ~14s in all; 60 would wait 7.6 minutes.)
+  try { fs.rmSync(w.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }); }
+  catch (e) { if (e.code !== "EPERM" && e.code !== "EBUSY") throw e; }
 }
 
 async function waitFor(fn, { timeout = 10000, every = 100 } = {}) {
@@ -160,4 +198,4 @@ async function waitFor(fn, { timeout = 10000, every = 100 } = {}) {
   }
 }
 
-module.exports = { HOUR, DAY, ago, makeWorld, addSession, appendTurns, addLive, setTabs, setVerdicts, calls, startServer, cleanup, waitFor };
+module.exports = { stopApp, ROOT, BIN, HOUR, DAY, DARWIN, WIN32, resumed, ago, makeWorld, addSession, appendTurns, addLive, setTabs, setVerdicts, calls, startServer, cleanup, waitFor };

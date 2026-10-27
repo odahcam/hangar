@@ -1,36 +1,38 @@
 // The web UI driven like a user would, against a real server and fixture sessions.
 const { test, expect } = require("@playwright/test");
-const { makeWorld, addSession, addLive, calls, startServer, cleanup, waitFor } = require("../test/helpers");
+const { DARWIN, makeWorld, addSession, addLive, resumed, cleanup, waitFor } = require("../test/helpers");
+const { launch } = require("./target");
 
-let w, srv, s;
-test.beforeEach(async ({ page }) => {
+let w, srv, s, page;
+test.beforeEach(async ({ page: browserPage }) => {
   w = makeWorld();
   s = {
     api: addSession(w, { cwd: "/w/acme/api", agentName: "Rate limiter", turns: [{ user: "add buckets" }] }),
     web: addSession(w, { cwd: "/w/acme/web", agentName: "Checkout redesign", turns: [{ user: "ship it behind a flag" }] }),
     blog: addSession(w, { cwd: "/w/side/blog", agentName: "Blog migration", turns: [{ user: "keep old urls" }, { user: "perfect, that's it" }] }),
   };
-  srv = await startServer(w);
+  srv = await launch(w);
   await srv.api("POST", "/api/order", { ids: [s.api.id, s.web.id, s.blog.id] });
-  await page.goto(srv.base + "/");
+  page = await srv.open(browserPage);
 });
-test.afterEach(async () => { await srv.stop(); cleanup(w); });
+test.afterEach(async () => { await srv?.stop(); srv = null; cleanup(w); });
 
 const titles = (page) => page.locator("#list li .title");
 const rowOf = (page, title) => page.locator("#list li", { has: page.locator(".title", { hasText: title }) });
 
-test("lists pending sessions in priority order with their project", async ({ page }) => {
+test("lists pending sessions in priority order with their project", async () => {
   await expect(titles(page)).toHaveText(["Rate limiter", "Checkout redesign", "Blog migration"]);
   await expect(rowOf(page, "Rate limiter").locator(".chip").first()).toHaveText("acme/api");
   await expect(page.locator("#counts")).toContainText("3 pending");
 });
 
-test("shows the headline tiles on the list views", async ({ page }) => {
-  await expect(page.locator("#tiles .tile")).toHaveCount(7);
+test("shows the headline tiles on the list views", async () => {
+  // The idle-tabs tile only exists where the terminal can list its tabs (macOS).
+  await expect(page.locator("#tiles .tile")).toHaveCount(DARWIN ? 7 : 6);
   await expect(page.locator("#tiles .tile").first()).toContainText("pending");
 });
 
-test("marking a session done moves it to the Done tab", async ({ page }) => {
+test("marking a session done moves it to the Done tab", async () => {
   await rowOf(page, "Checkout redesign").getByRole("button", { name: "Done", exact: true }).click();
   await expect(page.locator("#list li")).toHaveCount(2);
   await page.locator("#tabs").getByRole("button", { name: "Done" }).click();
@@ -38,21 +40,23 @@ test("marking a session done moves it to the Done tab", async ({ page }) => {
   expect((await srv.session(s.web.id)).doneBy).toBe("user");
 });
 
-test("a note is saved when the field loses focus", async ({ page }) => {
+test("a note is saved when the field loses focus", async () => {
   const note = rowOf(page, "Rate limiter").locator("textarea");
   await note.fill("stopped at the gateway");
   await note.blur();
   await waitFor(async () => (await srv.session(s.api.id)).note === "stopped at the gateway");
 });
 
-test("the arrows reorder sessions", async ({ page }) => {
+test("the arrows reorder sessions", async () => {
   await rowOf(page, "Blog migration").getByRole("button", { name: "↑" }).click();
   await expect(page.locator("#list li .title").nth(1)).toHaveText("Blog migration");
   expect((await srv.session(s.blog.id)).priority).toBe(20);
 });
 
-test("dragging a row onto another places it before that row", async ({ page }) => {
+test("dragging a row onto another places it before that row", async () => {
   // Step by step (two hovers so the target sees dragover) instead of dragTo, which is flaky for HTML5 drag under load.
+  // The tiles first: they arrive after the list and push it down, which would move the row out from under the drag.
+  await expect(page.locator("#tiles .tile")).toHaveCount(DARWIN ? 7 : 6);
   await rowOf(page, "Blog migration").locator(".rank").hover();
   await page.mouse.down();
   await rowOf(page, "Rate limiter").hover();
@@ -61,7 +65,7 @@ test("dragging a row onto another places it before that row", async ({ page }) =
   await expect(page.locator("#list li .title").first()).toHaveText("Blog migration");
 });
 
-test("the filter and the project picker narrow the list", async ({ page }) => {
+test("the filter and the project picker narrow the list", async () => {
   await page.locator("#q").fill("flag");
   await expect(titles(page)).toHaveText(["Checkout redesign"]);
   await page.locator("#q").fill("");
@@ -69,12 +73,12 @@ test("the filter and the project picker narrow the list", async ({ page }) => {
   await expect(titles(page)).toHaveText(["Blog migration"]);
 });
 
-test("Resume opens the session in Terminal", async ({ page }) => {
+test("Resume opens the session in the terminal", async () => {
   await rowOf(page, "Rate limiter").getByRole("button", { name: "Resume", exact: true }).click();
-  await waitFor(() => calls(w, "osascript").some((c) => c.script.includes(`claude --resume ${s.api.id}`)));
+  await waitFor(() => resumed(w, s.api.id));
 });
 
-test("Close needs a second click to confirm, then stops the open session", async ({ page }) => {
+test("Close needs a second click to confirm, then stops the open session", async () => {
   const child = addLive(w, s.web);
   await page.reload();
   const row = rowOf(page, "Checkout redesign");
@@ -88,7 +92,7 @@ test("Close needs a second click to confirm, then stops the open session", async
   await expect(row.locator(".live")).toHaveCount(0);
 });
 
-test("switching to Portuguese translates the page and is remembered", async ({ page }) => {
+test("switching to Portuguese translates the page and is remembered", async () => {
   await page.locator("#locale").selectOption("pt");
   await expect(page.locator("#tabs button").first()).toHaveText("Pendentes");
   await page.reload();
@@ -96,7 +100,7 @@ test("switching to Portuguese translates the page and is remembered", async ({ p
   await expect(page.locator("#counts")).toContainText("pendentes");
 });
 
-test("stopped sessions are flagged for attention; sessions in progress get a neutral mark", async ({ page }) => {
+test("stopped sessions are flagged for attention; sessions in progress get a neutral mark", async () => {
   await rowOf(page, "Checkout redesign").getByRole("button", { name: "In progress" }).click();
   const doing = rowOf(page, "Checkout redesign"), todo = rowOf(page, "Rate limiter");
   await expect(doing).toHaveClass(/\bdoing\b/);
@@ -116,21 +120,22 @@ test("stopped sessions are flagged for attention; sessions in progress get a neu
   expect(await css(doing.locator('[data-s="doing"]'), "color")).toBe(progress);
 });
 
-test("Close idle tabs shows it is working until Terminal answers", async ({ page }) => {
+test("Close idle tabs shows it is working until Terminal answers", async () => {
+  test.skip(!DARWIN, "only Terminal.app can list its tabs");
   const { setTabs } = require("../test/helpers");
   setTabs(w, [{ tty: "ttys001", busy: false }]);
   await page.locator("#tabs").getByRole("button", { name: "Insights" }).click();
-  await page.route("**/api/close-idle-tabs", async (route) => { await new Promise((r) => setTimeout(r, 3000)); await route.continue(); });
+  await srv.slow(page, 3000, "/api/close-idle-tabs");
   await page.getByRole("button", { name: "Close 1 idle tabs" }).click();
   await page.getByRole("button", { name: "Confirm" }).click();
   await expect(page.getByRole("button", { name: "Closing…" })).toBeDisabled({ timeout: 1000 });
 });
 
-test("the Insights tab shows its panels", async ({ page }) => {
+test("the Insights tab shows its panels", async () => {
   await page.locator("#tabs").getByRole("button", { name: "Insights" }).click();
   await expect(page.locator("#insights .panel h2")).toContainText([
     "Open × RAM", "Pending by project and age", "Prompts per day", "New × done per week",
-    "Longest sessions", "Costliest sessions", "Storage", "Idle Terminal tabs",
+    "Longest sessions", "Costliest sessions", "Storage", ...(DARWIN ? ["Idle Terminal tabs"] : []),
   ]);
   await expect(page.locator("#toolbar")).toBeHidden();
 });

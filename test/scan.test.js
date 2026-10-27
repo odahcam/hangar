@@ -60,6 +60,14 @@ test("a single project keeps its last path segment", async () => {
   assert.equal((await srv.session(a.id)).project, "api");
 });
 
+test("project label works on Windows paths too", async () => {
+  const a = addSession(w, { cwd: String.raw`C:\Users\demo\Projects\acme\api`, turns: [{ user: "a" }] });
+  const b = addSession(w, { cwd: String.raw`C:\Users\demo\Projects\blog`, turns: [{ user: "b" }] });
+  srv = await startServer(w);
+  assert.equal((await srv.session(a.id)).project, String.raw`acme\api`);
+  assert.equal((await srv.session(b.id)).project, "blog");
+});
+
 test("streamed records of one message count its tokens once, latest usage wins", async () => {
   const s = addSession(w, { turns: [
     { user: "go" },

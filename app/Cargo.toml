@@ -1,0 +1,17 @@
+[package]
+name = "hangar"
+description = "Hangar desktop app: the web UI in the system webview, calling the core in-process."
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+hangar-core = { path = "../core" }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-autostart = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-window-state = "2"

@@ -1,9 +1,9 @@
-// Live sessions, transcript backup and the Terminal actions (through a fake osascript).
+// Live sessions, transcript backup and the terminal actions (through a fake osascript on macOS, a fake wt.exe on Windows).
 const { test, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { makeWorld, addSession, appendTurns, addLive, setTabs, calls, startServer, cleanup, waitFor } = require("./helpers");
+const { DARWIN, WIN32, makeWorld, addSession, appendTurns, addLive, setTabs, calls, resumed, startServer, cleanup, waitFor } = require("./helpers");
 
 let w, srv;
 beforeEach(() => { w = makeWorld(); });
@@ -13,7 +13,7 @@ const backupOf = (s) => path.join(w.data, "transcripts", s.id + ".jsonl");
 const tick = (ms = 50) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-test("a session with a running process is live, with its pid and tty", async () => {
+test("a session with a running process is live, with its pid and tty", { skip: !DARWIN }, async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
   const child = addLive(w, s);
   srv = await startServer(w);
@@ -29,7 +29,7 @@ test("a registered session whose process is gone is not live", async () => {
   assert.equal((await srv.session(s.id)).live, null);
 });
 
-test("a live session without a name takes the Terminal tab title", async () => {
+test("a live session without a name takes the Terminal tab title", { skip: !DARWIN }, async () => {
   const s = addSession(w, { turns: [{ user: "first prompt" }] });
   addLive(w, s);
   srv = await startServer(w);
@@ -38,7 +38,7 @@ test("a live session without a name takes the Terminal tab title", async () => {
   assert.equal((await srv.session(s.id)).title, "Tab title");
 });
 
-test("resuming a closed session opens a new Terminal tab with claude --resume in its cwd", async () => {
+test("resuming a closed session opens a new Terminal tab with claude --resume in its cwd", { skip: !DARWIN }, async () => {
   const s = addSession(w, { cwd: "/work/it's here", turns: [{ user: "a" }] });
   srv = await startServer(w);
   const r = await srv.api("POST", `/api/resume/${s.id}`);
@@ -47,7 +47,7 @@ test("resuming a closed session opens a new Terminal tab with claude --resume in
   assert.ok(script.includes(`cd '/work/it'\\\\''s here' && claude --resume ${s.id}`), script);
 });
 
-test("resuming a live session focuses its tab instead of opening another", async () => {
+test("resuming a live session focuses its tab instead of opening another", { skip: !DARWIN }, async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
   addLive(w, s);
   srv = await startServer(w);
@@ -58,7 +58,7 @@ test("resuming a live session focuses its tab instead of opening another", async
   assert.ok(!calls(w, "osascript").some((c) => c.script.includes("claude --resume")));
 });
 
-test("resuming a live session whose tab is gone opens a new tab", async () => {
+test("resuming a live session whose tab is gone opens a new tab", { skip: !DARWIN }, async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
   addLive(w, s);
   srv = await startServer(w);
@@ -98,7 +98,7 @@ test("resume restores a deleted transcript from the backup", async () => {
   assert.equal(fs.readFileSync(s.file, "utf8"), content);
 });
 
-test("closing a live session stops its process and exits its tab", async () => {
+test("closing a live session stops its process and exits its tab", { skip: !DARWIN }, async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
   const child = addLive(w, s);
   srv = await startServer(w);
@@ -119,7 +119,7 @@ test("closing a session that is not running does nothing", async () => {
   assert.deepEqual(r.json, { closed: false, reason: "not_running" });
 });
 
-test("closing idle tabs exits only tabs with nothing running", async () => {
+test("closing idle tabs exits only tabs with nothing running", { skip: !DARWIN }, async () => {
   setTabs(w, [{ tty: "ttys001", busy: false }, { tty: "ttys002", busy: true }, { tty: "ttys003", busy: false }]);
   srv = await startServer(w);
   const r = await srv.api("POST", "/api/close-idle-tabs");
@@ -127,4 +127,39 @@ test("closing idle tabs exits only tabs with nothing running", async () => {
   await tick();
   const exited = calls(w, "osascript").filter((c) => c.script.includes('do script "exit"')).map((c) => c.script.match(/"\/dev\/(\w+)"/)[1]);
   assert.deepEqual(exited.sort(), ["ttys001", "ttys003"]);
+});
+
+test("on Windows a live session is live, with no tab to focus", { skip: !WIN32 }, async () => {
+  const s = addSession(w, { turns: [{ user: "a" }] });
+  const child = addLive(w, s);
+  srv = await startServer(w);
+  assert.deepEqual((await srv.session(s.id)).live, { pid: child.pid, canFocus: false });
+});
+
+test("on Windows resuming a closed session opens a Windows Terminal tab in its cwd", { skip: !WIN32 }, async () => {
+  const s = addSession(w, { cwd: String.raw`C:\work\a;b`, turns: [{ user: "a" }] });
+  srv = await startServer(w);
+  const r = await srv.api("POST", `/api/resume/${s.id}`);
+  assert.deepEqual(r.json, { opened: true });
+  assert.deepEqual(calls(w, "wt")[0].args, ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`, "claude", "--resume", s.id]);
+  assert.ok(resumed(w, s.id));
+});
+
+test("on Windows resuming a session that is still running is refused instead of forking it", { skip: !WIN32 }, async () => {
+  const s = addSession(w, { turns: [{ user: "a" }] });
+  addLive(w, s);
+  srv = await startServer(w);
+  const r = await srv.api("POST", `/api/resume/${s.id}`);
+  assert.equal(r.status, 409);
+  assert.deepEqual(calls(w, "wt"), []);
+});
+
+test("on Windows closing a live session stops its process", { skip: !WIN32 }, async () => {
+  const s = addSession(w, { turns: [{ user: "a" }] });
+  const child = addLive(w, s);
+  srv = await startServer(w);
+  const r = await srv.api("POST", `/api/close/${s.id}`);
+  assert.deepEqual(r.json, { closed: true });
+  await waitFor(() => !alive(child.pid) || child.exitCode !== null || child.signalCode !== null);
+  assert.equal((await srv.session(s.id)).live, null);
 });

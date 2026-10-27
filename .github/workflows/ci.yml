@@ -1,0 +1,60 @@
+# Every PR and push to main: the core's acceptance suite, the UI e2e specs and the packaged desktop app, on macOS and Windows.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer commit on the same branch or PR supersedes a run still in progress.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+
+      - name: Core (unit suite over HTTP)
+        run: npm test
+      - name: UI e2e, web target
+        run: npm run test:e2e
+      # WebView2 speaks the DevTools protocol, so on Windows the same specs drive the real desktop app.
+      - name: WebView2 runtime
+        if: runner.os == 'Windows'
+        run: |
+          Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue | Select-Object pv, name
+          # Policies that could switch off remote debugging for the webview.
+          foreach ($k in 'HKLM:\SOFTWARE\Policies\Microsoft\Edge', 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2', 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\WebView2') {
+            if (Test-Path $k) { "$k"; Get-ItemProperty $k | Format-List | Out-String }
+          }
+      - name: UI e2e, desktop app
+        if: runner.os == 'Windows'
+        timeout-minutes: 20
+        run: npm run test:desktop
+      - name: Packaged app
+        run: npm run test:build
+
+      - name: Zip the macOS app
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent target/release/bundle/macos/Hangar.app Hangar.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hangar-${{ runner.os }}
+          path: |
+            Hangar.zip
+            target/release/bundle/nsis/*.exe
+          if-no-files-found: ignore

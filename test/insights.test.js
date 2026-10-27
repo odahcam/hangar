@@ -1,7 +1,7 @@
 // Insights payload: totals, pending by project and age, activity, weekly counts, top lists, storage, open sessions.
 const { test, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
-const { HOUR, DAY, makeWorld, addSession, addLive, setTabs, startServer, cleanup } = require("./helpers");
+const { HOUR, DAY, DARWIN, makeWorld, addSession, addLive, setTabs, startServer, cleanup } = require("./helpers");
 
 let w, srv;
 beforeEach(() => { w = makeWorld(); });
@@ -84,7 +84,7 @@ test("storage reports sizes, backups and nothing pending without backup", async 
   assert.equal(typeof storage.backupMb, "number");
 });
 
-test("open sessions report memory and idle hours; idle tabs are listed", async () => {
+test("open sessions report memory and idle hours; idle tabs are listed", { skip: !DARWIN }, async () => {
   const s = addSession(w, { agentName: "open one", endAgo: 30 * HOUR, turns: [{ user: "a" }] });
   addLive(w, s);
   setTabs(w, [{ tty: "ttys009", busy: false }, { tty: "ttys010", busy: true }]);
@@ -96,4 +96,15 @@ test("open sessions report memory and idle hours; idle tabs are listed", async (
   assert.ok(memory.sessions[0].mb >= 0);
   assert.ok(memory.ramTotalMb > 0);
   assert.deepEqual(idleTabs, ["ttys009"]);
+});
+
+test("without a terminal that lists tabs, open sessions still report memory and idle tabs are null", { skip: DARWIN }, async () => {
+  const s = addSession(w, { agentName: "open one", endAgo: 30 * HOUR, turns: [{ user: "a" }] });
+  addLive(w, s);
+  srv = await startServer(w);
+  const { memory, idleTabs } = await insights();
+  assert.equal(memory.sessions[0].title, "open one");
+  assert.ok(memory.sessions[0].mb > 0, "the live process's memory is measured");
+  assert.ok(memory.ramTotalMb > 0);
+  assert.equal(idleTabs, null);
 });

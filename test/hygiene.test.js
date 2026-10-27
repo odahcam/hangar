@@ -19,6 +19,8 @@ const PATTERNS = [
 ];
 // Addresses that are part of the product, not someone's identity.
 const ALLOWED_EMAILS = ["noreply@anthropic.com"];
+// Retina asset names (icon@2x.png) look like addresses too.
+const ASSET_NAME = /@\d+x\.(png|jpe?g|gif|webp)$/;
 
 test("tracked files contain no personal paths, emails or credentials", () => {
   const found = [];
@@ -26,7 +28,7 @@ test("tracked files contain no personal paths, emails or credentials", () => {
     const text = fs.readFileSync(path.join(ROOT, f), "utf8");
     for (const [re, what] of PATTERNS) {
       const m = text.match(new RegExp(re.source, re.flags + "g")) || [];
-      for (const hit of m) if (!ALLOWED_EMAILS.includes(hit)) found.push(`${f}: ${what}: ${hit}`);
+      for (const hit of m) if (!ALLOWED_EMAILS.includes(hit) && !ASSET_NAME.test(hit)) found.push(`${f}: ${what}: ${hit}`);
     }
   }
   assert.deepEqual(found, []);
