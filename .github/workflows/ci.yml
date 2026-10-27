@@ -36,6 +36,10 @@ jobs:
       - name: WebView2 runtime
         if: runner.os == 'Windows'
         run: Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue | Select-Object pv, name
+          # Policies that could switch off remote debugging for the webview.
+          foreach ($k in 'HKLM:\SOFTWARE\Policies\Microsoft\Edge', 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2', 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\WebView2') {
+            if (Test-Path $k) { "$k"; Get-ItemProperty $k | Format-List | Out-String }
+          }
       - name: UI e2e, desktop app
         if: runner.os == 'Windows'
         timeout-minutes: 20

@@ -118,6 +118,20 @@ fn main() {
             if std::env::var_os("HANGAR_WINDOW_OFFSCREEN").is_some() {
                 builder = builder.position(-32000.0, -32000.0).focused(false).skip_taskbar(true);
             }
+            // ...and drives the webview over the DevTools protocol (WebView2 only). Extra browser arguments replace
+            // Tauri's own, so they are kept, and --disable-features is merged since a second one would override the first.
+            #[cfg(windows)]
+            if let Ok(args) = std::env::var("HANGAR_WEBVIEW_ARGS") {
+                let mut features = vec!["msWebOOUI", "msPdfOOUI", "msSmartScreenProtection"];
+                let mut rest = vec![];
+                for a in args.split_whitespace() {
+                    match a.strip_prefix("--disable-features=") {
+                        Some(f) => features.extend(f.split(',')),
+                        None => rest.push(a),
+                    }
+                }
+                builder = builder.additional_browser_args(&format!("--disable-features={} {}", features.join(","), rest.join(" ")));
+            }
             let window = builder
                 .title("Hangar")
                 .inner_size(1100.0, 800.0)

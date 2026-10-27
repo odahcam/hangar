@@ -40,7 +40,7 @@ async function launchDesktop(w, env) {
       // Port 0: the webview picks a free one and writes it to DevToolsActivePort in its profile, so parallel
       // instances can never end up on the same port.
       // Occlusion off: a window behind others (or off screen) must not be treated as hidden and throttled.
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=0 --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding",
+      HANGAR_WEBVIEW_ARGS: "--remote-debugging-port=0 --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding",
       HANGAR_WINDOW_OFFSCREEN: "1",
       HANGAR_OSASCRIPT: path.join(BIN, "osascript.js"),
       HANGAR_WT: path.join(BIN, "wt.js"),

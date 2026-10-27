@@ -8,7 +8,8 @@ module.exports = defineConfig({
   reporter: "list",
   use: { channel: "chrome", headless: true, locale: "en-US", colorScheme: "light" },
   projects: [
-    { name: "web" },
+    // One retry on CI: HTML5 drag in headless Chrome occasionally misses a dragover on a loaded runner.
+    { name: "web", retries: process.env.CI ? 1 : 0 },
     // One retry: WebView2 sometimes closes the DevTools connection (cleanly, code 1000) while a delayed core call is
     // pending, with the app still running and silent. That's the test transport, not Hangar; a real app failure
     // fails both attempts, and an app that dies is reported as "exited mid-test".
