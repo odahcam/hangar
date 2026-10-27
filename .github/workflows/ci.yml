@@ -1,9 +1,15 @@
-# Every push: the core's acceptance suite, the UI e2e specs and the packaged desktop app, on macOS and Windows.
+# Every PR and push to main: the core's acceptance suite, the UI e2e specs and the packaged desktop app, on macOS and Windows.
 name: CI
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# A newer commit on the same branch or PR supersedes a run still in progress.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
