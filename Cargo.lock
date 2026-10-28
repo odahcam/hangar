@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "hangar"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hangar-core",
  "serde_json",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "hangar-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "libc",
