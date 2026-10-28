@@ -1,10 +1,9 @@
 // Windows: sessions open as Windows Terminal tabs. Windows Terminal can't list its tabs or select one from outside,
 // so there is no tab focus or idle-tab cleanup here.
 use super::{Caps, Platform, Tab};
-use crate::proc::run;
+use crate::proc::{command, run, SESSION_ENV};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -52,14 +51,16 @@ impl Platform for Windows {
             return Err("unsupported_path".into());
         }
         let dir = cwd.replace(';', "\\;");
-        let cmd = format!("set CLAUDE_CONFIG_DIR={}&& claude --resume {id}", config_s.as_deref().unwrap_or("")).replace(';', "\\;");
+        // The window may itself have been started from a Claude Code session; see proc::SESSION_ENV.
+        let clear: String = SESSION_ENV.iter().map(|k| format!("set {k}=&& ")).collect();
+        let cmd = format!("{clear}set CLAUDE_CONFIG_DIR={}&& claude --resume {id}", config_s.as_deref().unwrap_or("")).replace(';', "\\;");
         let r = run(&WT, &["-w", "0", "new-tab", "--startingDirectory", &dir, "cmd", "/c", &cmd], Duration::from_secs(8));
         if !r.missing {
             return Ok(());
         }
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_CONSOLE: u32 = 0x10;
-        let mut c = Command::new("claude");
+        let mut c = command("claude");
         match config {
             Some(d) => c.env("CLAUDE_CONFIG_DIR", d),
             None => c.env_remove("CLAUDE_CONFIG_DIR"),

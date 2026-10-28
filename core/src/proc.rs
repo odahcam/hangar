@@ -13,16 +13,29 @@ pub struct Output {
     pub missing: bool,
 }
 
-/// A command for `bin`. A `.js` path runs under `node`, so the test fakes in test/bin work on every OS
-/// (Windows can't exec a shebang script).
+/// What Claude Code sets for the processes it runs. Hangar inherits them when it was started from a Claude Code
+/// session, and a `claude` that sees them takes itself for that session's child: it writes no transcript of its own.
+/// Only these go; the user's own CLAUDE_CODE_* settings (CLAUDE_CODE_GIT_BASH_PATH and the like) stay.
+pub const SESSION_ENV: &[&str] = &[
+    "CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_BRIDGE_MCP_CARRIER",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+];
+
+/// A command for `bin`, without the environment of a Claude Code session Hangar may have been started from.
+/// A `.js` path runs under `node`, so the test fakes in test/bin work on every OS (Windows can't exec a shebang script).
 pub fn command(bin: &str) -> Command {
-    if bin.ends_with(".js") {
+    let mut c = if bin.ends_with(".js") {
         let mut c = Command::new("node");
         c.arg(bin);
         c
     } else {
         Command::new(bin)
+    };
+    for k in SESSION_ENV {
+        c.env_remove(k);
     }
+    c
 }
 
 /// Runs a helper binary to completion; never fails: callers read ok/out/err.
