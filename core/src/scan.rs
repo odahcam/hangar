@@ -131,6 +131,7 @@ pub fn scan_file(db: &Connection, file: &Path) -> rusqlite::Result<bool> {
             if !p.is_empty() {
                 row.first_prompt.get_or_insert_with(|| p.clone());
                 row.last_prompt = Some(p);
+                set_str(&mut row.last_prompt_at, &rec["timestamp"]);
                 row.prompts += 1;
                 if let Some(day) = rec["timestamp"].as_str().and_then(local_day) {
                     *days.entry(day).or_default() += 1;

@@ -115,3 +115,12 @@ test("last activity is the newest timestamp in the transcript", async () => {
   const age = Date.now() - new Date((await srv.session(s.id)).lastAt);
   assert.ok(age >= 3 * HOUR - 5000 && age < 3 * HOUR + 60000, `age ${age}`);
 });
+
+test("last message sent is the newest human prompt, not the assistant's reply", async () => {
+  const s = addSession(w, { endAgo: 3 * HOUR, turns: [{ user: "a" }, { user: "<system-reminder>x</system-reminder>" }, { assistant: "b" }] });
+  srv = await startServer(w);
+  const row = await srv.session(s.id);
+  const age = Date.now() - new Date(row.lastPromptAt);
+  assert.ok(age >= 3 * HOUR + 120000 - 5000 && age < 3 * HOUR + 180000, `age ${age}`);
+  assert.ok(row.lastPromptAt < row.lastAt);
+});

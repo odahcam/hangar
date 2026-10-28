@@ -133,6 +133,7 @@ impl Hangar {
                     "lastPrompt": t.last_prompt,
                     "firstAt": t.first_at,
                     "lastAt": t.last_at,
+                    "lastPromptAt": t.last_prompt_at,
                     "prompts": t.prompts,
                     "tokensIn": t.tokens_in,
                     "tokensCache": t.tokens_cache,
