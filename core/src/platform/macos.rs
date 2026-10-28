@@ -93,7 +93,8 @@ impl Platform for MacOs {
             Some(dir) => format!("CLAUDE_CONFIG_DIR={} ", sh_quote(&dir.to_string_lossy())),
             None => "unset CLAUDE_CONFIG_DIR && ".into(),
         };
-        let cmd = format!("cd {} && {env}claude --resume {id}", sh_quote(cwd));
+        // Terminal's shell may carry a Claude Code session's environment; see proc::SESSION_ENV.
+        let cmd = format!("cd {} && unset {} && {env}claude --resume {id}", sh_quote(cwd), crate::proc::SESSION_ENV.join(" "));
         osascript(&format!("tell application \"Terminal\"\ndo script {}\nactivate\nend tell", as_string(&cmd)));
         Ok(())
     }

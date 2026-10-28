@@ -44,7 +44,8 @@ test("resuming a closed session opens a new Terminal tab with claude --resume in
   const r = await srv.api("POST", `/api/resume/${s.id}`);
   assert.deepEqual(r.json, { opened: true });
   const script = calls(w, "osascript").map((c) => c.script).find((x) => x.includes("do script"));
-  assert.ok(script.includes(`cd '/work/it'\\\\''s here' && CLAUDE_CONFIG_DIR='${w.claude}' claude --resume ${s.id}`), script);
+  assert.ok(script.includes(`cd '/work/it'\\\\''s here' && unset CLAUDECODE CLAUDE_PID CLAUDE_CODE_CHILD_SESSION `), script);
+  assert.ok(script.includes(` CLAUDE_CODE_MESSAGING_TOKEN && CLAUDE_CONFIG_DIR='${w.claude}' claude --resume ${s.id}`), script);
 });
 
 test("resuming a live session focuses its tab instead of opening another", { skip: !DARWIN }, async () => {
@@ -136,13 +137,20 @@ test("on Windows a live session is live, with no tab to focus", { skip: !WIN32 }
   assert.deepEqual((await srv.session(s.id)).live, { pid: child.pid, canFocus: false });
 });
 
-test("on Windows resuming a closed session opens a Windows Terminal tab in its cwd", { skip: !WIN32 }, async () => {
+// Started from a Claude Code session, Hangar inherits the variables that would make the resumed claude its child
+// (no transcript): they are kept from wt and cleared inside the tab, which may get the window's environment instead.
+test("on Windows resuming a closed session opens a Windows Terminal tab in its cwd, not as a Claude Code child", { skip: !WIN32 }, async () => {
   const s = addSession(w, { cwd: String.raw`C:\work\a;b`, turns: [{ user: "a" }] });
-  srv = await startServer(w);
+  srv = await startServer(w, { CLAUDECODE: "1", CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CODE_SESSION_ID: "parent" });
   const r = await srv.api("POST", `/api/resume/${s.id}`);
   assert.deepEqual(r.json, { opened: true });
-  assert.deepEqual(calls(w, "wt")[0].args, ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`, "cmd", "/c",
-    `set CLAUDE_CONFIG_DIR=${w.claude.replaceAll(";", "\\;")}&& claude --resume ${s.id}`]);
+  const clear = ["CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_BRIDGE_MCP_CARRIER",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"].map((k) => `set ${k}=&& `).join("");
+  const [call] = calls(w, "wt");
+  assert.deepEqual(call.args, ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`, "cmd", "/c",
+    `${clear}set CLAUDE_CONFIG_DIR=${w.claude.replaceAll(";", "\\;")}&& claude --resume ${s.id}`]);
+  assert.deepEqual(call.sessionEnv, []);
   assert.ok(resumed(w, s.id));
 });
 
