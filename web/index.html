@@ -41,8 +41,23 @@ li { background: var(--surface); border: 1px solid var(--line); border-radius: 8
 li.todo { border-left: 3px solid var(--attention); }
 li.doing { border-left: 3px solid var(--progress); }
 li.done { opacity: .6; }
-li.over { outline: 2px dashed var(--accent); outline-offset: 2px; }
-.rank { font: 500 12px var(--mono); color: var(--muted); text-align: center; padding-top: 2px; cursor: grab; user-select: none; }
+li.over-before { box-shadow: 0 -4px 0 -1px var(--accent); }
+li.over-after { box-shadow: 0 4px 0 -1px var(--accent); }
+.rank { font: 500 12px var(--mono); color: var(--muted); display: flex; flex-direction: column; align-items: center; gap: 2px; user-select: none; }
+.rank.handle { cursor: grab; touch-action: none; }
+li.dragging { opacity: .5; }
+body.dragging { user-select: none; -webkit-user-select: none; }
+body.dragging * { cursor: grabbing !important; }
+.rank button { font: 11px var(--sans); line-height: 1; border: 0; background: none; color: var(--muted); padding: 2px 4px; cursor: pointer; border-radius: 4px; }
+.rank button:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
+.rank button:disabled { opacity: .3; cursor: default; }
+.rank .grip { font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: 4px; opacity: .6; }
+li:hover .rank .grip { opacity: 1; }
+.rank .grip:hover { color: var(--accent); background: var(--accent-soft); }
+.rank .num { cursor: text; padding: 1px 2px; border-radius: 4px; }
+.rank .num:hover { color: var(--fg); background: var(--line); }
+.rank input { width: 28px; font: 500 12px var(--mono); text-align: center; padding: 1px 0; color: var(--fg); background: var(--bg); border: 1px solid var(--accent); border-radius: 4px; -moz-appearance: textfield; }
+.rank input::-webkit-inner-spin-button { display: none; }
 .main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .title { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
 .meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font: 12px var(--mono); color: var(--muted); }
@@ -142,6 +157,11 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
     <input type="search" id="q" data-i18n-placeholder="filterPlaceholder" data-i18n-label="filter">
     <select id="acct" data-i18n-label="account" hidden></select>
     <select id="proj" data-i18n-label="project"></select>
+    <select id="sort" data-i18n-label="sort">
+      <option value=""></option>
+      <option value="prompt" data-i18n="sortPrompt"></option>
+    </select>
+    <button class="btn" id="sortDir" data-i18n-label="sortDir"></button>
     <label class="btn"><input type="checkbox" id="liveOnly"> <span data-i18n="openOnly"></span></label>
     <label class="btn"><input type="checkbox" id="suggestedOnly"> <span data-i18n="suggestedOnly"></span></label>
     <button class="btn" id="checkNow" data-i18n="checkNow"></button>
@@ -164,6 +184,15 @@ const shown = () => accounts.filter((a) => !a.hidden);
 const multi = () => shown().length > 1;
 const accountOf = (dir) => accounts.find((a) => a.dir === dir);
 try { const v = location.hash.slice(1) || localStorage.getItem("view"); if (["done", "insights", "settings"].includes(v)) view = v; } catch {}
+let sortRev = false;
+try {
+  const v = localStorage.getItem("sort"); if ([...$("#sort").options].some((o) => o.value === v)) $("#sort").value = v;
+  sortRev = localStorage.getItem("sortRev") === "1";
+} catch {}
+// Each sort has a natural direction (your order 1 → n, dates newest first); the toggle flips it.
+const sortAsc = () => ($("#sort").value === "" && view === "pending") !== sortRev;
+// Any other order is a view of the list: the order you set stays, and can't be dragged in it.
+const reorderable = () => view === "pending" && $("#sort").value === "" && !sortRev;
 const settingsBack = () => showView(lastTab);
 // Also called by the desktop app's Settings… menu item. Settings stands apart from the tabs: it isn't remembered,
 // and its back button returns to the tab it was opened from.
@@ -244,6 +273,10 @@ function byPriority(a, b) {
   return a.priority - b.priority;
 }
 function pendingOrder() { return items.filter((s) => s.status !== "done").sort(byPriority); }
+// Last prompt you sent; a session without one falls back to its last activity.
+const promptAt = (s) => s.lastPromptAt || s.lastAt || "";
+const byPrompt = (a, b) => promptAt(a).localeCompare(promptAt(b));
+const byDoneAt = (a, b) => (a.doneAt || "").localeCompare(b.doneAt || "");
 
 function render() {
   const ins = view === "insights", set = view === "settings";
@@ -256,11 +289,18 @@ function render() {
   if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), accountsPanel(), classifierSettings());
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
   const acct = multi() ? $("#acct").value : "";
-  const base = view === "pending" ? pendingOrder()
-    : items.filter((s) => s.status === "done").sort((a, b) => (b.doneAt || "").localeCompare(a.doneAt || ""));
+  const byPrompts = $("#sort").value === "prompt";
+  $("#sort").options[0].textContent = t(view === "pending" ? "sortPriority" : "sortDone");
+  $("#sortDir").textContent = sortAsc() ? "↑ " + t("asc") : "↓ " + t("desc");
+  const base = items.filter((s) => (s.status === "done") === (view === "done"))
+    .sort(byPrompts ? byPrompt : view === "pending" ? byPriority : byDoneAt);
+  if (!sortAsc()) base.reverse();
   const list = base.filter((s) => (!p || s.project === p) && (!acct || s.account === acct) && (!liveOnly || s.live) && (!suggestedOnly || s.suggestion) &&
     (!qs || [s.title, s.aiTitle, s.project, s.branch, s.firstPrompt, s.lastPrompt, s.note, s.id, accountOf(s.account)?.name].join(" ").toLowerCase().includes(qs)));
-  $("#list").replaceChildren(...list.map((s, i) => row(s, view === "pending" ? i + 1 : "")));
+  // Rank = place among the sessions you prioritized, so it reads the same under any filter or sort.
+  // Untriaged ones have none yet: they show a dash.
+  const rank = new Map(pendingOrder().filter((s) => s.priority != null).map((s, i) => [s.id, i + 1]));
+  $("#list").replaceChildren(...list.map((s) => row(s, view === "pending" ? rank.get(s.id) ?? "—" : "")));
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-pressed", b.dataset.v === view);
   $("#empty").hidden = list.length > 0;
   $("#empty").textContent = view === "pending" ? t("emptyPending") : t("emptyDone");
@@ -272,7 +312,8 @@ function render() {
 }
 
 function row(s, rank) {
-  const li = el("li", { class: s.status, draggable: view === "pending" ? "true" : false });
+  const reorder = reorderable();
+  const li = el("li", { class: s.status, "data-id": s.id });
   const side = [];
   side.push(el("div", { class: "status", role: "group", "aria-label": t("status") }, [["todo", t("statusTodo")], ["doing", t("statusDoing")], ["done", t("statusDone")]].map(([st, label]) => {
     const b = el("button", { "data-s": st, "aria-pressed": s.status === st, text: label });
@@ -280,7 +321,6 @@ function row(s, rank) {
     return b;
   })));
   const btns = [];
-  if (view === "pending") btns.push(btn("↑", "", () => move(s.id, -1)), btn("↓", "", () => move(s.id, 1)));
   // A running session whose tab can't be brought forward gets no button: resuming it again would fork it.
   if (!s.live || s.live.canFocus) {
     const resume = btn(s.live ? t("goToTab") : t("resume"), "primary", () => pending(resume, t("opening"), () => api("POST", `/api/resume/${s.id}`)));
@@ -301,14 +341,14 @@ function row(s, rank) {
   note.value = s.note || "";
   note.onchange = () => mutate(() => { s.note = note.value; }, () => api("PATCH", `/api/session/${s.id}`, { note: note.value }), { rerender: false });
   li.append(
-    el("div", { class: "rank", text: String(rank) }),
+    view === "pending" ? rankCell(s, rank, reorder, li) : el("div", { class: "rank" }),
     el("div", { class: "main" }, [
       el("div", { class: "title", text: s.title }),
       el("div", { class: "meta" }, [
         multi() && accountOf(s.account) ? el("span", { class: "acct", style: `color:${accountOf(s.account).color}`, text: accountOf(s.account).name }) : null,
         el("span", { class: "chip", text: s.project || "?" }),
         s.branch ? el("span", { text: "⎇ " + s.branch }) : null,
-        el("span", { text: t("active", { ago: ago(s.lastAt) }) }),
+        el("span", { text: $("#sort").value === "prompt" ? t("lastSent", { ago: ago(promptAt(s)) }) : t("active", { ago: ago(s.lastAt) }) }),
         s.live ? el("span", { class: "live", text: t("open", { tty: s.live.tty || "" }) }) : null,
         s.priority == null && s.status !== "done" ? el("span", { class: "chip", text: t("isNew") }) : null,
         !s.transcript ? el("span", { class: s.backedUp ? "" : "warn", text: s.backedUp ? t("onlyBackup") : t("transcriptGone") }) : null,
@@ -342,14 +382,75 @@ function row(s, rank) {
     ]),
     el("div", { class: "side" }, side),
   );
-  if (view === "pending") {
-    li.addEventListener("dragstart", () => dragId = s.id);
-    li.addEventListener("dragend", () => dragId = null);
-    li.addEventListener("dragover", (e) => { if (dragId && dragId !== s.id) { e.preventDefault(); li.classList.add("over"); } });
-    li.addEventListener("dragleave", () => li.classList.remove("over"));
-    li.addEventListener("drop", (e) => { e.preventDefault(); li.classList.remove("over"); if (dragId) placeBefore(dragId, s.id); });
-  }
   return li;
+}
+
+// Dragging by the rank column, on pointer events rather than HTML5 drag and drop: the desktop app's webview window
+// takes native drops for itself, so a drop event never reached the page there. Only a prioritized row is a target:
+// released over its upper half the session goes before it, lower half after.
+function dragHandle(cell, s, li) {
+  // Move and release are followed on window (no pointer capture: it would retarget a plain click on the number).
+  let start = null, target = null, moved = false;
+  const clear = () => { for (const x of document.querySelectorAll(".over-before, .over-after")) x.classList.remove("over-before", "over-after"); };
+  const end = () => {
+    clear(); li.classList.remove("dragging"); document.body.classList.remove("dragging"); start = target = null; dragId = null;
+    window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); window.removeEventListener("pointercancel", end);
+  };
+  const onUp = () => { const to = target; end(); if (to) placeNear(s.id, to.id, to.after); };
+  cell.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || e.target.closest("button, input")) return;
+    start = e.clientY; moved = false;
+    window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp); window.addEventListener("pointercancel", end);
+  });
+  function onMove(e) {
+    if (!moved && Math.abs(e.clientY - start) < 4) return;
+    moved = true; dragId = s.id; li.classList.add("dragging"); document.body.classList.add("dragging");
+    clear(); target = null;
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest("#list li");
+    const ts = over && byId(over.dataset.id);
+    if (!ts || ts.id === s.id || ts.priority == null || ts.status === "done") return;
+    const r = over.getBoundingClientRect();
+    target = { id: ts.id, after: e.clientY > r.top + r.height / 2 };
+    over.classList.add(target.after ? "over-after" : "over-before");
+  }
+  // A drag that ends on the number isn't a click on it.
+  cell.addEventListener("click", (e) => { if (moved) { e.stopPropagation(); moved = false; } }, true);
+}
+
+// The rank column: the session's place in the order you set (a dash before it has one), ↑/↓ around it, and the
+// number itself takes a new place when clicked. The column is also the drag handle, so text in the row stays selectable.
+function rankCell(s, rank, reorder, li) {
+  const ids = triaged(), i = ids.indexOf(s.id);
+  const num = el("span", { class: "num", role: "button", tabindex: 0, text: String(rank), title: rank === "—" ? t("isNew") : t("setPriority"), "aria-label": t("setPriority") });
+  const cell = el("div", { class: "rank" + (reorder ? " handle" : "") });
+  const arrow = (label, dir, off) => {
+    const b = el("button", { text: label, disabled: off || false, "aria-label": label });
+    b.onclick = () => move(s.id, dir);
+    return b;
+  };
+  num.onclick = num.onkeydown = (e) => {
+    if (e.type === "keydown" && e.key !== "Enter") return;
+    const input = el("input", { type: "number", min: 1, step: 1, value: i < 0 ? null : i + 1, "aria-label": t("setPriority") });
+    let done = false;
+    const commit = (save) => {
+      if (done) return;
+      done = true;
+      const n = Math.floor(Number(input.value));
+      if (save && input.value.trim() !== "" && n >= 1 && n - 1 !== i) placeAt(s.id, n - 1); else render();
+    };
+    input.onkeydown = (k) => { if (k.key === "Enter") commit(true); if (k.key === "Escape") commit(false); };
+    input.onblur = () => commit(true);
+    num.replaceWith(input);
+    input.focus(); input.select();
+  };
+  // Arrows and the number work under any sort, on the order you set; an untriaged session gets its first place by
+  // number or by drag. Dragging needs the list shown in that order, so only then is there a handle.
+  cell.append(...(i >= 0 ? [arrow("↑", -1, i === 0), num, arrow("↓", 1, i === ids.length - 1)] : [num]));
+  if (reorder) {
+    cell.append(el("span", { class: "grip", text: "⠿", title: t("dragToReorder"), "aria-hidden": "true" }));
+    dragHandle(cell, s, li);
+  }
+  return cell;
 }
 
 // Copies the session into another account, the source kept unless "remove" is checked. An open session can't go:
@@ -366,20 +467,25 @@ function transferControl(s) {
     el("label", {}, [rm, " " + t("removeFrom", { name: accountOf(s.account)?.name || "" })]), go]);
 }
 
-// Moves operate on the full pending order (filters ignored) and persist all of it.
+// The order you set: prioritized pending sessions only, filters ignored. Untriaged ones stay out of it until placed,
+// so moving one session never prioritizes the others. Every move persists the whole order.
+const triaged = () => pendingOrder().filter((s) => s.priority != null).map((s) => s.id);
 function saveOrder(ids) {
   mutate(() => ids.forEach((id, i) => { byId(id).priority = (i + 1) * 10; }), () => api("POST", "/api/order", { ids }));
 }
-function move(id, dir) {
-  const ids = pendingOrder().map((s) => s.id), i = ids.indexOf(id), j = i + dir;
-  if (j < 0 || j >= ids.length) return;
-  [ids[i], ids[j]] = [ids[j], ids[i]];
+// Puts the session at 0-based place `at` (clamped), out of wherever it was.
+function placeAt(id, at) {
+  const ids = triaged().filter((x) => x !== id);
+  ids.splice(Math.max(0, Math.min(at, ids.length)), 0, id);
   saveOrder(ids);
 }
-function placeBefore(id, target) {
-  const ids = pendingOrder().map((s) => s.id).filter((x) => x !== id);
-  ids.splice(ids.indexOf(target), 0, id);
-  saveOrder(ids);
+function move(id, dir) {
+  const ids = triaged(), j = ids.indexOf(id) + dir;
+  if (ids.includes(id) && j >= 0 && j < ids.length) placeAt(id, j);
+}
+function placeNear(id, target, after) {
+  const ids = triaged().filter((x) => x !== id);
+  placeAt(id, ids.indexOf(target) + (after ? 1 : 0));
 }
 
 // --- insights
@@ -612,6 +718,9 @@ $("#settingsBtn").onclick = () => view === "settings" ? settingsBack() : showVie
 $("#q").oninput = render;
 $("#proj").onchange = render;
 $("#acct").onchange = render;
+const saveSort = () => { try { localStorage.setItem("sort", $("#sort").value); localStorage.setItem("sortRev", sortRev ? "1" : ""); } catch {} render(); };
+$("#sort").onchange = () => { sortRev = false; saveSort(); };
+$("#sortDir").onclick = () => { sortRev = !sortRev; saveSort(); };
 $("#liveOnly").onchange = render;
 $("#suggestedOnly").onchange = render;
 $("#checkNow").onclick = (e) => checkNow(e.currentTarget);

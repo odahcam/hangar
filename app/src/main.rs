@@ -145,9 +145,9 @@ fn main() {
                 .title("Hangar")
                 .inner_size(1100.0, 800.0)
                 .min_inner_size(480.0, 400.0)
-                // Links that leave the app open in the default browser.
+                // Links that leave the app open in the default browser. `tauri dev` serves the page from 127.0.0.1.
                 .on_navigation(move |url| {
-                    let internal = !matches!(url.scheme(), "http" | "https") || matches!(url.host_str(), Some("tauri.localhost" | "localhost"));
+                    let internal = !matches!(url.scheme(), "http" | "https") || matches!(url.host_str(), Some("tauri.localhost" | "localhost" | "127.0.0.1"));
                     if !internal {
                         let _ = opener.opener().open_url(url.as_str(), None::<&str>);
                     }

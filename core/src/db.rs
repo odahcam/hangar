@@ -2,7 +2,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 // transcript/activity are derived caches: on a schema bump they are dropped and rebuilt from the jsonl files.
-const SCHEMA: &str = "2";
+const SCHEMA: &str = "3";
 
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let db = Connection::open(path)?;
@@ -25,7 +25,7 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
         "create table if not exists transcript (
           id text primary key, file text not null, offset integer not null, mtime real not null, size integer not null default 0,
           cwd text, branch text, agent_name text, ai_title text, first_prompt text, last_prompt text,
-          first_at text, last_at text, prompts integer not null default 0,
+          first_at text, last_at text, last_prompt_at text, prompts integer not null default 0,
           tokens_in integer not null default 0, tokens_cache integer not null default 0, tokens_out integer not null default 0,
           last_msg text, last_in integer, last_cache integer, last_out integer);
         create table if not exists activity (id text not null, day text not null, n integer not null, primary key (id, day));
@@ -51,6 +51,8 @@ pub struct Transcript {
     pub last_prompt: Option<String>,
     pub first_at: Option<String>,
     pub last_at: Option<String>,
+    /// When the human last sent a prompt; last_at also moves with the assistant's replies.
+    pub last_prompt_at: Option<String>,
     pub prompts: i64,
     pub tokens_in: i64,
     pub tokens_cache: i64,
@@ -76,6 +78,7 @@ fn transcript(r: &Row) -> rusqlite::Result<Transcript> {
         last_prompt: r.get("last_prompt")?,
         first_at: r.get("first_at")?,
         last_at: r.get("last_at")?,
+        last_prompt_at: r.get("last_prompt_at")?,
         prompts: r.get("prompts")?,
         tokens_in: r.get("tokens_in")?,
         tokens_cache: r.get("tokens_cache")?,
@@ -98,12 +101,12 @@ pub fn all_t(db: &Connection) -> rusqlite::Result<Vec<Transcript>> {
 pub fn put_t(db: &Connection, t: &Transcript) -> rusqlite::Result<()> {
     db.prepare_cached(
         "insert or replace into transcript (id, file, offset, mtime, size, cwd, branch, agent_name, ai_title, first_prompt, last_prompt,
-          first_at, last_at, prompts, tokens_in, tokens_cache, tokens_out, last_msg, last_in, last_cache, last_out)
-        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+          first_at, last_at, last_prompt_at, prompts, tokens_in, tokens_cache, tokens_out, last_msg, last_in, last_cache, last_out)
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
     )?
     .execute(params![
         t.id, t.file, t.offset, t.mtime, t.size, t.cwd, t.branch, t.agent_name, t.ai_title, t.first_prompt, t.last_prompt,
-        t.first_at, t.last_at, t.prompts, t.tokens_in, t.tokens_cache, t.tokens_out, t.last_msg, t.last_in, t.last_cache, t.last_out
+        t.first_at, t.last_at, t.last_prompt_at, t.prompts, t.tokens_in, t.tokens_cache, t.tokens_out, t.last_msg, t.last_in, t.last_cache, t.last_out
     ])?;
     Ok(())
 }

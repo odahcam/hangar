@@ -1,6 +1,6 @@
 // The web UI driven like a user would, against a real server and fixture sessions.
 const { test, expect } = require("@playwright/test");
-const { DARWIN, makeWorld, addSession, addLive, resumed, cleanup, waitFor } = require("../test/helpers");
+const { DARWIN, makeWorld, addSession, appendTurns, addLive, resumed, cleanup, waitFor } = require("../test/helpers");
 const { launch } = require("./target");
 
 let w, srv, s, page;
@@ -57,7 +57,7 @@ test("dragging a row onto another places it before that row", async () => {
   // Step by step (two hovers so the target sees dragover) instead of dragTo, which is flaky for HTML5 drag under load.
   // The tiles first: they arrive after the list and push it down, which would move the row out from under the drag.
   await expect(page.locator("#tiles .tile")).toHaveCount(DARWIN ? 7 : 6);
-  await rowOf(page, "Blog migration").locator(".rank").hover();
+  await rowOf(page, "Blog migration").locator(".rank .grip").hover();
   await page.mouse.down();
   await rowOf(page, "Rate limiter").hover();
   await rowOf(page, "Rate limiter").hover({ position: { x: 20, y: 20 } });
@@ -71,6 +71,75 @@ test("the filter and the project picker narrow the list", async () => {
   await page.locator("#q").fill("");
   await page.locator("#proj").selectOption("side/blog");
   await expect(titles(page)).toHaveText(["Blog migration"]);
+  await expect(page.locator("#list li .rank .num")).toHaveText(["3"]);
+});
+
+test("sorting by last message sent is remembered and leaves the order you set alone", async () => {
+  appendTurns(s.web, [{ user: "one more thing" }]);
+  await page.reload();
+  await page.locator("#sort").selectOption("prompt");
+  await expect(page.locator("#sortDir")).toHaveText(/Descending/);
+  await expect(titles(page).first()).toHaveText("Checkout redesign");
+  await expect(page.locator("#list li").first().locator(".rank .num")).toHaveText("2");
+  // Under another sort the priority still edits; only dragging, which needs the list in priority order, is gone.
+  await expect(page.locator("#list .grip")).toHaveCount(0);
+  await page.locator("#list li").first().getByRole("button", { name: "↑" }).click();
+  await expect(page.locator("#list li").first().locator(".rank .num")).toHaveText("1");
+  await expect(titles(page).first()).toHaveText("Checkout redesign");
+  await page.locator("#list li").first().getByRole("button", { name: "↓" }).click();
+  await expect(page.locator("#list li").first().locator(".rank .num")).toHaveText("2");
+  await page.locator("#sortDir").click();
+  await expect(titles(page).last()).toHaveText("Checkout redesign");
+  await page.reload();
+  await expect(page.locator("#sort")).toHaveValue("prompt");
+  await expect(page.locator("#sortDir")).toHaveText(/Ascending/);
+  await page.locator("#sort").selectOption({ label: "Priority" });
+  await expect(titles(page)).toHaveText(["Rate limiter", "Checkout redesign", "Blog migration"]);
+  await page.locator("#sortDir").click();
+  await expect(titles(page)).toHaveText(["Blog migration", "Checkout redesign", "Rate limiter"]);
+  await expect(page.locator("#list li .rank .num")).toHaveText(["3", "2", "1"]);
+});
+
+test("a session not prioritized yet shows a dash, and the others keep their numbers", async () => {
+  addSession(w, { cwd: "/w/acme/api", agentName: "Fresh one", turns: [{ user: "hi" }] });
+  await page.reload();
+  await expect(titles(page)).toHaveText(["Fresh one", "Rate limiter", "Checkout redesign", "Blog migration"]);
+  await expect(page.locator("#list li .rank .num")).toHaveText(["—", "1", "2", "3"]);
+  await expect(rowOf(page, "Fresh one").locator(".chip", { hasText: "not prioritized" })).toHaveCount(1);
+  await expect(rowOf(page, "Fresh one").getByRole("button", { name: "↓" })).toHaveCount(0);
+  // Moving a prioritized session leaves the untriaged one alone.
+  await rowOf(page, "Rate limiter").getByRole("button", { name: "↓" }).click();
+  await expect(page.locator("#list li .rank .num")).toHaveText(["—", "1", "2", "3"]);
+  await expect(titles(page)).toHaveText(["Fresh one", "Checkout redesign", "Rate limiter", "Blog migration"]);
+  const fresh = (await srv.sessions()).find((x) => x.title === "Fresh one");
+  expect(fresh.priority).toBeNull();
+});
+
+test("clicking the number takes a new priority", async () => {
+  await rowOf(page, "Blog migration").locator(".rank .num").click();
+  await rowOf(page, "Blog migration").locator(".rank input").fill("1");
+  await rowOf(page, "Blog migration").locator(".rank input").press("Enter");
+  await expect(titles(page)).toHaveText(["Blog migration", "Rate limiter", "Checkout redesign"]);
+  await waitFor(async () => (await srv.session(s.blog.id)).priority === 10);
+  // An untriaged session gets its first place the same way; the others keep theirs.
+  addSession(w, { cwd: "/w/acme/api", agentName: "Fresh one", turns: [{ user: "hi" }] });
+  await page.reload();
+  await rowOf(page, "Fresh one").locator(".rank .num").click();
+  await rowOf(page, "Fresh one").locator(".rank input").fill("2");
+  await rowOf(page, "Fresh one").locator(".rank input").press("Enter");
+  await expect(titles(page)).toHaveText(["Blog migration", "Fresh one", "Rate limiter", "Checkout redesign"]);
+});
+
+test("dropping on the lower half of a row places the session after it", async () => {
+  await expect(page.locator("#tiles .tile")).toHaveCount(DARWIN ? 7 : 6);
+  await rowOf(page, "Rate limiter").locator(".rank .grip").hover();
+  await page.mouse.down();
+  const target = rowOf(page, "Checkout redesign");
+  await target.hover();
+  const box = await target.boundingBox();
+  await target.hover({ position: { x: 20, y: box.height - 8 } });
+  await page.mouse.up();
+  await expect(titles(page)).toHaveText(["Checkout redesign", "Rate limiter", "Blog migration"]);
 });
 
 test("Resume opens the session in the terminal", async () => {

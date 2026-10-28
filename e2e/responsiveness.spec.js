@@ -48,7 +48,7 @@ test("the arrows reorder immediately and the order is saved", async () => {
 test("dragging reorders immediately", async () => {
   // The tiles arrive after the list and push it down; wait for them so the drag starts on a row that stays put.
   await expect(page.locator("#tiles .tile")).toHaveCount(DARWIN ? 7 : 6);
-  await rowOf(page, "Charlie").locator(".rank").hover();
+  await rowOf(page, "Charlie").locator(".rank .grip").hover();
   await page.mouse.down();
   await rowOf(page, "Alpha").hover();
   await rowOf(page, "Alpha").hover({ position: { x: 20, y: 20 } });
