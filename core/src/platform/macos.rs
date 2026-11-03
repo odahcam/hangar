@@ -10,7 +10,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub struct MacOs;
 
@@ -234,22 +234,24 @@ pub(crate) fn spawn_disclaimed(cmd: &Command, piped_stdin: bool) -> Option<Discl
 
 /// Waits for a spawned child and kills it past the timeout (then None, as `run_with` does).
 pub(crate) fn wait(pid: libc::pid_t, timeout: Duration) -> Option<ExitStatus> {
-    let end = Instant::now() + timeout;
-    let mut status = 0;
-    loop {
-        match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
-            0 if Instant::now() < end => std::thread::sleep(Duration::from_millis(50)),
-            0 => break,
-            -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
-            -1 => return None,
-            _ => return Some(ExitStatus::from_raw(status)),
-        }
-    }
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-        while libc::waitpid(pid, &mut status, 0) == -1 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {}
-    }
-    None
+    // A blocking wait on a thread, not a polling loop: the caller learns of the exit as soon as it happens.
+    let (done, exited) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut status = 0;
+        let reaped = loop {
+            match unsafe { libc::waitpid(pid, &mut status, 0) } {
+                -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+                -1 => break None,
+                _ => break Some(ExitStatus::from_raw(status)),
+            }
+        };
+        let _ = done.send(reaped);
+    });
+    exited.recv_timeout(timeout).unwrap_or_else(|_| {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _ = exited.recv();
+        None
+    })
 }
 
 #[cfg(test)]
