@@ -54,7 +54,7 @@ const STRINGS = {
     accountName: "Account name", accountColor: "Account color", hide: "Hide", show: "Show", remove: "Remove", hiddenL: "hidden",
     addFolder: "Add folder", addFolderPlaceholder: "Path to a Claude Code config folder, e.g. ~/.claude-work", folderAdded: "Folder added",
     err_open: "close the session before moving it", err_newer_in_target: "the copy in that account is newer", err_same_account: "already in that account",
-    err_transcript_gone: "the transcript is gone", err_not_a_folder: "not a folder", err_unsupported_path: "the account folder's path has a character the terminal can't take",
+    err_transcript_gone: "the transcript is gone", err_folder_unknown: "can't tell which folder this session belongs to", err_not_a_folder: "not a folder", err_unsupported_path: "the account folder's path has a character the terminal can't take",
   },
   pt: {
     loading: "carregando…",
@@ -110,7 +110,7 @@ const STRINGS = {
     accountName: "Nome da conta", accountColor: "Cor da conta", hide: "Ocultar", show: "Mostrar", remove: "Remover", hiddenL: "oculta",
     addFolder: "Adicionar pasta", addFolderPlaceholder: "Caminho de uma pasta de config do Claude Code, ex. ~/.claude-work", folderAdded: "Pasta adicionada",
     err_open: "encerre a sessão antes de movê-la", err_newer_in_target: "a cópia nessa conta é mais nova", err_same_account: "já está nessa conta",
-    err_transcript_gone: "o transcript sumiu", err_not_a_folder: "não é uma pasta", err_unsupported_path: "o caminho da pasta da conta tem um caractere que o terminal não aceita",
+    err_transcript_gone: "o transcript sumiu", err_folder_unknown: "não dá para saber de qual pasta é esta sessão", err_not_a_folder: "não é uma pasta", err_unsupported_path: "o caminho da pasta da conta tem um caractere que o terminal não aceita",
   },
 };
 

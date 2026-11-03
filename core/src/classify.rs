@@ -2,7 +2,7 @@
 // Any done=true verdict is shown as a suggestion; it is applied on its own (auto_done) only at confidence >= 0.90
 // and when the quoted evidence is literally one of the user's own messages.
 use crate::platform;
-use crate::proc::{command, run_with};
+use crate::proc::{command, run_disclaimed};
 use crate::scan::{collapse, human_prompt};
 use serde_json::{json, Value};
 use std::fs;
@@ -57,7 +57,7 @@ fn find_claude() -> Option<String> {
         return Some(found.to_string_lossy().into());
     }
     let (cmd, args) = p.which_claude();
-    let out = run_with(command(&cmd).args(&args), None, Duration::from_secs(10));
+    let out = run_disclaimed(command(&cmd).args(&args), None, Duration::from_secs(10));
     out.out.lines().next().map(str::trim).filter(|s| out.ok && !s.is_empty()).map(String::from)
 }
 
@@ -148,7 +148,7 @@ fn ask_haiku(prompt: &str, account: &Path) -> Result<(Value, Option<f64>), Strin
     } else {
         cmd.env("CLAUDE_CONFIG_DIR", account);
     }
-    let out = run_with(&mut cmd, Some(prompt), Duration::from_secs(180));
+    let out = run_disclaimed(&mut cmd, Some(prompt), Duration::from_secs(180));
     if !out.ok {
         let tail: String = if out.err.trim().is_empty() { out.out.trim().to_string() } else { out.err.trim().to_string() };
         let n = tail.chars().count();

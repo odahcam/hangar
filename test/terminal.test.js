@@ -44,8 +44,35 @@ test("resuming a closed session opens a new Terminal tab with claude --resume in
   const r = await srv.api("POST", `/api/resume/${s.id}`);
   assert.deepEqual(r.json, { opened: true });
   const script = calls(w, "osascript").map((c) => c.script).find((x) => x.includes("do script"));
-  assert.ok(script.includes(`cd '/work/it'\\\\''s here' && unset CLAUDECODE CLAUDE_PID CLAUDE_CODE_CHILD_SESSION `), script);
+  // The cd runs alone first: Terminal only learns the tab's directory at a prompt, and new tabs inherit it from there.
+  assert.ok(script.includes(`do script "cd '/work/it'\\\\''s here'\\ncd '/work/it'\\\\''s here' && unset CLAUDECODE CLAUDE_PID CLAUDE_CODE_CHILD_SESSION `), script);
   assert.ok(script.includes(` CLAUDE_CODE_MESSAGING_TOKEN && CLAUDE_CONFIG_DIR='${w.claude}' claude --resume ${s.id}`), script);
+});
+
+test("a session with no message yet resumes in the folder its project name resolves to on disk", { skip: !DARWIN }, async () => {
+  fs.mkdirSync(path.join(w.root, "my-app/sub dir"), { recursive: true });
+  fs.mkdirSync(path.join(w.root, "my"));
+  const cwd = fs.realpathSync(path.join(w.root, "my-app/sub dir"));
+  const s = addSession(w, { cwd, agentName: "Only a name" });
+  srv = await startServer(w);
+  assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { opened: true });
+  const script = calls(w, "osascript").map((c) => c.script).find((x) => x.includes("do script"));
+  assert.ok(script.includes(`do script "cd '${cwd}'\\n`), script);
+});
+
+test("a session with no message whose project name fits no single folder is refused, not opened elsewhere", async () => {
+  const gone = addSession(w, { cwd: path.join(w.root, "gone"), agentName: "Gone" });
+  fs.mkdirSync(path.join(w.root, "two-ways"));
+  fs.mkdirSync(path.join(w.root, "two/ways"), { recursive: true });
+  const twoWays = addSession(w, { cwd: path.join(w.root, "two-ways"), agentName: "Ambiguous" });
+  srv = await startServer(w);
+  for (const s of [gone, twoWays]) {
+    const r = await srv.api("POST", `/api/resume/${s.id}`);
+    assert.equal(r.status, 409);
+    assert.deepEqual(r.json, { error: "folder_unknown" });
+  }
+  assert.ok(!calls(w, "osascript").some((c) => c.script.includes("do script")));
+  assert.deepEqual(calls(w, "wt"), []);
 });
 
 test("resuming a live session focuses its tab instead of opening another", { skip: !DARWIN }, async () => {

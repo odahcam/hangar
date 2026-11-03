@@ -20,6 +20,39 @@ pub(crate) fn config_dir(file: &Path) -> Option<&Path> {
     file.parent()?.parent().filter(|p| p.file_name().is_some_and(|n| n == "projects"))?.parent()
 }
 
+/// Claude Code names a project folder after its cwd, every non-alphanumeric turned into '-'. That can't be undone by
+/// reading the name, so it is matched against the disk, entering only folders that fit. None unless exactly one fits.
+fn cwd_from_project(file: &Path) -> Option<String> {
+    let slug = file.parent()?.file_name()?.to_str()?;
+    let (root, rest) = match slug.strip_prefix('-') {
+        Some(rest) => ("/".to_string(), rest),
+        None if slug.get(1..3) == Some("--") => (format!("{}:\\", &slug[..1]), &slug[3..]),
+        None => return None,
+    };
+    let mut found = Vec::new();
+    match_project(Path::new(&root), rest, &mut found);
+    match found.as_slice() {
+        [only] => Some(only.to_string_lossy().into()),
+        _ => None,
+    }
+}
+
+fn match_project(dir: &Path, rest: &str, found: &mut Vec<PathBuf>) {
+    if rest.is_empty() {
+        found.push(dir.to_path_buf());
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name: String = entry.file_name().to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let Some(after) = rest.strip_prefix(name.as_str()) else { continue };
+        let next = if after.is_empty() { Some("") } else { after.strip_prefix('-') };
+        if let Some(next) = next.filter(|_| entry.path().is_dir()) {
+            match_project(&entry.path(), next, found);
+        }
+    }
+}
+
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::create_dir_all(to)?;
     for e in fs::read_dir(from)?.flatten() {
@@ -184,8 +217,12 @@ impl Hangar {
             }
             let _ = fs::copy(&saved, file);
         }
-        let home = crate::home();
-        let cwd = nonempty(&t.cwd).map(String::from).unwrap_or_else(|| home.to_string_lossy().into());
+        // A transcript with no message yet records no cwd. Opening somewhere else would have Claude Code ask to trust it.
+        let cwd = nonempty(&t.cwd)
+            .or(live.as_ref().and_then(|l| nonempty(&l.cwd)))
+            .map(String::from)
+            .or_else(|| cwd_from_project(file))
+            .ok_or_else(|| ApiError(409, "folder_unknown".into()))?;
         let config = config_dir(file).filter(|d| !accounts::is_default(d));
         self.platform.open(&cwd, id, config).map_err(|e| ApiError(500, e))?;
         Ok(json!({ "opened": true }))

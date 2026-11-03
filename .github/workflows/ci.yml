@@ -30,6 +30,9 @@ jobs:
 
       - name: Core (unit suite over HTTP)
         run: npm test
+      - name: Core (macOS process spawning)
+        if: runner.os == 'macOS'
+        run: cargo test -p hangar-core
       - name: UI e2e, web target
         run: npm run test:e2e
       # WebView2 speaks the DevTools protocol, so on Windows the same specs drive the real desktop app.
