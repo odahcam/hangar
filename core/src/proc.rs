@@ -1,6 +1,6 @@
 // Child processes and the process table, the same on every OS.
-use std::io::Read;
-use std::process::{Command, Stdio};
+use std::io::{Read, Write};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use wait_timeout::ChildExt;
@@ -50,10 +50,40 @@ pub fn run_with(cmd: &mut Command, stdin: Option<&str>, timeout: Duration) -> Ou
         Ok(c) => c,
         Err(e) => return Output { ok: false, out: String::new(), err: e.to_string(), missing: e.kind() == std::io::ErrorKind::NotFound },
     };
-    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+    let input = stdin.zip(child.stdin.take()).map(|(text, p)| (text, Box::new(p) as Box<dyn Write + Send>));
+    let stdout = child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>);
+    let stderr = child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>);
+    finish(input, stdout, stderr, || match child.wait_timeout(timeout) {
+        Ok(Some(s)) => Some(s),
+        _ => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    })
+}
+
+/// `run_with` for `claude` and the user's login shell, whose file access is not Hangar's: on macOS a child otherwise
+/// answers to Hangar for privacy permissions, and the dialog names Hangar for what they do.
+pub fn run_disclaimed(cmd: &mut Command, stdin: Option<&str>, timeout: Duration) -> Output {
+    #[cfg(target_os = "macos")]
+    if let Some(p) = crate::platform::macos::spawn_disclaimed(cmd, stdin.is_some()) {
+        let input = stdin.zip(p.stdin).map(|(text, f)| (text, Box::new(f) as Box<dyn Write + Send>));
+        let pid = p.pid;
+        return finish(input, Some(Box::new(p.stdout)), Some(Box::new(p.stderr)), || crate::platform::macos::wait(pid, timeout));
+    }
+    run_with(cmd, stdin, timeout)
+}
+
+fn finish(
+    input: Option<(&str, Box<dyn Write + Send>)>,
+    stdout: Option<Box<dyn Read + Send>>,
+    stderr: Option<Box<dyn Read + Send>>,
+    wait: impl FnOnce() -> Option<ExitStatus>,
+) -> Output {
+    if let Some((text, mut pipe)) = input {
         let text = text.to_owned();
         std::thread::spawn(move || {
-            use std::io::Write;
             let _ = pipe.write_all(text.as_bytes());
         });
     }
@@ -67,16 +97,9 @@ pub fn run_with(cmd: &mut Command, stdin: Option<&str>, timeout: Duration) -> Ou
             s
         })
     };
-    let out = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let err = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let status = match child.wait_timeout(timeout) {
-        Ok(Some(s)) => Some(s),
-        _ => {
-            let _ = child.kill();
-            let _ = child.wait();
-            None
-        }
-    };
+    let out = drain(stdout);
+    let err = drain(stderr);
+    let status = wait();
     let (out, mut err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
     match status {
         Some(s) if !s.success() => err = format!("exit {}: {}", s.code().unwrap_or(-1), err.trim()),

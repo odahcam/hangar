@@ -1,8 +1,14 @@
 // macOS: Terminal.app through AppleScript, memory from `footprint`.
 use super::{Caps, Platform, Tab};
 use crate::proc::run;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::{CString, OsStr, OsString};
+use std::fs::File;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -23,7 +29,7 @@ end repeat
 return out"#;
 
 fn as_string(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"))
 }
 
 fn sh_quote(s: &str) -> String {
@@ -94,7 +100,10 @@ impl Platform for MacOs {
             None => "unset CLAUDE_CONFIG_DIR && ".into(),
         };
         // Terminal's shell may carry a Claude Code session's environment; see proc::SESSION_ENV.
-        let cmd = format!("cd {} && unset {} && {env}claude --resume {id}", sh_quote(cwd), crate::proc::SESSION_ENV.join(" "));
+        // Terminal learns a tab's directory (what a new tab inherits) from the OSC 7 the shell prints at each prompt, so
+        // the cd needs a prompt of its own before claude takes the tab. It repeats on the second line to keep the guard.
+        let dir = sh_quote(cwd);
+        let cmd = format!("cd {dir}\ncd {dir} && unset {} && {env}claude --resume {id}", crate::proc::SESSION_ENV.join(" "));
         osascript(&format!("tell application \"Terminal\"\ndo script {}\nactivate\nend tell", as_string(&cmd)));
         Ok(())
     }
@@ -119,5 +128,173 @@ impl Platform for MacOs {
                 Some((m[1].parse().ok()?, m[2].parse::<f64>().ok()? * unit))
             })
             .collect()
+    }
+}
+
+/// A child that answers for its own privacy permissions, with piped stdout and stderr.
+pub(crate) struct Disclaimed {
+    pub pid: libc::pid_t,
+    pub stdin: Option<File>,
+    pub stdout: File,
+    pub stderr: File,
+}
+
+extern "C" {
+    // Public since macOS 10.15, missing from the libc crate.
+    fn posix_spawn_file_actions_addchdir_np(actions: *mut libc::posix_spawn_file_actions_t, path: *const libc::c_char) -> libc::c_int;
+}
+
+fn cstring(s: &OsStr) -> Option<CString> {
+    CString::new(s.as_bytes()).ok()
+}
+
+/// (read end, write end), neither inherited by default.
+fn pipe() -> Option<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let ends = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    for fd in fds {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    Some(ends)
+}
+
+/// Spawns `cmd` (program, args, environment changes and directory) as its own responsible process. None when that can't
+/// be done, the private call included: it is looked up at runtime so a macOS without it costs only the attribution.
+/// Command can't carry the attribute, so this is posix_spawn by hand, with the same signal setup Command gives a child.
+pub(crate) fn spawn_disclaimed(cmd: &Command, piped_stdin: bool) -> Option<Disclaimed> {
+    let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"responsibility_spawnattrs_setdisclaim".as_ptr()) };
+    if sym.is_null() {
+        return None;
+    }
+    let set_disclaim: unsafe extern "C" fn(*mut libc::posix_spawnattr_t, libc::c_int) -> libc::c_int = unsafe { std::mem::transmute(sym) };
+
+    let argv = std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(cstring).collect::<Option<Vec<_>>>()?;
+    let mut vars: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    for (k, v) in cmd.get_envs() {
+        match v {
+            Some(v) => vars.insert(k.to_owned(), v.to_owned()),
+            None => vars.remove(k),
+        };
+    }
+    let envp = vars.iter().map(|(k, v)| cstring(&[k.as_os_str(), v.as_os_str()].join(OsStr::new("=")))).collect::<Option<Vec<_>>>()?;
+    let dir = match cmd.get_current_dir() {
+        Some(d) => Some(cstring(d.as_os_str())?),
+        None => None,
+    };
+    let as_ptrs = |v: &[CString]| v.iter().map(|s| s.as_ptr() as *mut libc::c_char).chain([std::ptr::null_mut()]).collect::<Vec<_>>();
+    let (c_argv, c_envp) = (as_ptrs(&argv), as_ptrs(&envp));
+
+    let child_in = if piped_stdin { Some(pipe()?) } else { None };
+    let (out_r, out_w) = pipe()?;
+    let (err_r, err_w) = pipe()?;
+
+    let mut pid = 0;
+    let spawned = unsafe {
+        let mut attr: libc::posix_spawnattr_t = std::ptr::null_mut();
+        let mut actions: libc::posix_spawn_file_actions_t = std::ptr::null_mut();
+        if libc::posix_spawnattr_init(&mut attr) != 0 {
+            return None;
+        }
+        if libc::posix_spawn_file_actions_init(&mut actions) != 0 {
+            libc::posix_spawnattr_destroy(&mut attr);
+            return None;
+        }
+        let spawned = (|| {
+            let ok = |rc: libc::c_int| (rc == 0).then_some(());
+            let (mut no_signals, mut sigpipe) = (0, 0);
+            libc::sigemptyset(&mut no_signals);
+            libc::sigemptyset(&mut sigpipe);
+            libc::sigaddset(&mut sigpipe, libc::SIGPIPE);
+            ok(libc::posix_spawnattr_setsigmask(&mut attr, &no_signals))?;
+            ok(libc::posix_spawnattr_setsigdefault(&mut attr, &sigpipe))?;
+            let flags = libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
+            ok(libc::posix_spawnattr_setflags(&mut attr, flags as libc::c_short))?;
+            ok(set_disclaim(&mut attr, 1))?;
+            if let Some(d) = &dir {
+                ok(posix_spawn_file_actions_addchdir_np(&mut actions, d.as_ptr()))?;
+            }
+            match &child_in {
+                Some((r, _)) => ok(libc::posix_spawn_file_actions_adddup2(&mut actions, r.as_raw_fd(), 0))?,
+                None => ok(libc::posix_spawn_file_actions_addopen(&mut actions, 0, c"/dev/null".as_ptr(), libc::O_RDONLY, 0))?,
+            }
+            ok(libc::posix_spawn_file_actions_adddup2(&mut actions, out_w.as_raw_fd(), 1))?;
+            ok(libc::posix_spawn_file_actions_adddup2(&mut actions, err_w.as_raw_fd(), 2))?;
+            ok(libc::posix_spawnp(&mut pid, c_argv[0], &actions, &attr, c_argv.as_ptr(), c_envp.as_ptr()))
+        })();
+        libc::posix_spawn_file_actions_destroy(&mut actions);
+        libc::posix_spawnattr_destroy(&mut attr);
+        spawned
+    };
+    spawned?;
+    Some(Disclaimed { pid, stdin: child_in.map(|(_, w)| File::from(w)), stdout: File::from(out_r), stderr: File::from(err_r) })
+}
+
+/// Waits for a spawned child and kills it past the timeout (then None, as `run_with` does).
+pub(crate) fn wait(pid: libc::pid_t, timeout: Duration) -> Option<ExitStatus> {
+    // A blocking wait on a thread, not a polling loop: the caller learns of the exit as soon as it happens.
+    let (done, exited) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut status = 0;
+        let reaped = loop {
+            match unsafe { libc::waitpid(pid, &mut status, 0) } {
+                -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+                -1 => break None,
+                _ => break Some(ExitStatus::from_raw(status)),
+            }
+        };
+        let _ = done.send(reaped);
+    });
+    exited.recv_timeout(timeout).unwrap_or_else(|_| {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _ = exited.recv();
+        None
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proc::{command, run_disclaimed};
+
+    fn responsible_for(pid: libc::pid_t) -> libc::pid_t {
+        let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"responsibility_get_pid_responsible_for_pid".as_ptr()) };
+        assert!(!sym.is_null());
+        let f: unsafe extern "C" fn(libc::pid_t) -> libc::pid_t = unsafe { std::mem::transmute(sym) };
+        unsafe { f(pid) }
+    }
+
+    #[test]
+    fn a_disclaimed_child_answers_for_itself_and_a_plain_one_does_not() {
+        let mut sleep = Command::new("/bin/sleep");
+        sleep.arg("5");
+        let d = spawn_disclaimed(&sleep, false).expect("spawned");
+        assert_eq!(responsible_for(d.pid), d.pid);
+        assert!(wait(d.pid, Duration::from_millis(1)).is_none(), "killed at the timeout");
+
+        let mut plain = sleep.spawn().unwrap();
+        assert_ne!(responsible_for(plain.id() as libc::pid_t), plain.id() as libc::pid_t);
+        plain.kill().unwrap();
+        plain.wait().unwrap();
+    }
+
+    #[test]
+    fn a_disclaimed_run_keeps_stdin_stdout_stderr_cwd_env_and_exit_code() {
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        std::env::set_var("HANGAR_TEST_GONE", "still here");
+        let mut cmd = command("/bin/sh");
+        cmd.args(["-c", "cat; pwd; echo \"$KEPT[$HANGAR_TEST_GONE]\"; echo oops >&2; exit 3"]).current_dir(&dir).env("KEPT", "kept").env_remove("HANGAR_TEST_GONE");
+        let out = run_disclaimed(&mut cmd, Some("typed\n"), Duration::from_secs(10));
+        assert_eq!(out.out, format!("typed\n{}\nkept[]\n", dir.display()));
+        assert_eq!(out.err, "exit 3: oops");
+        assert!(!out.ok);
+    }
+
+    #[test]
+    fn a_program_that_cannot_start_falls_back_and_reports_missing() {
+        let out = run_disclaimed(&mut command("/nonexistent/claude"), None, Duration::from_secs(5));
+        assert!(out.missing);
     }
 }
