@@ -19,6 +19,13 @@ test.afterEach(async () => { await srv?.stop(); srv = null; cleanup(w); });
 
 const titles = (page) => page.locator("#list li .title");
 const rowOf = (page, title) => page.locator("#list li", { has: page.locator(".title", { hasText: title }) });
+// Selects the session's line; its panel holds everything else.
+const panel = async (title) => {
+  const r = rowOf(page, title);
+  if (!/\bsel\b/.test(await r.getAttribute("class"))) await r.locator(".title").click();
+  await expect(page.locator("#detail h2")).toHaveText(title);
+  return page.locator("#detail");
+};
 
 test("lists pending sessions in priority order with their project", async () => {
   await expect(titles(page)).toHaveText(["Rate limiter", "Checkout redesign", "Blog migration"]);
@@ -32,19 +39,85 @@ test("shows the headline tiles on the list views", async () => {
   await expect(page.locator("#tiles .tile").first()).toContainText("pending");
 });
 
+test("the panel shows the overview until a session is picked, and again when it is picked twice", async () => {
+  await expect(page.locator("#detail h2")).toHaveText("Overview");
+  await expect(page.locator("#detail")).toContainText("Pending by project and age");
+  await expect(page.locator("#list li.sel")).toHaveCount(0);
+  await (await panel("Blog migration")).getByText("perfect, that's it").waitFor();
+  await expect(rowOf(page, "Blog migration")).toHaveClass(/\bsel\b/);
+  await rowOf(page, "Blog migration").locator(".title").click();
+  await expect(page.locator("#detail h2")).toHaveText("Overview");
+  await expect(page.locator("#list li.sel")).toHaveCount(0);
+  // ✕ and Escape close it too.
+  await panel("Blog migration");
+  await page.getByRole("button", { name: "Back to the overview" }).click();
+  await expect(page.locator("#detail h2")).toHaveText("Overview");
+  await panel("Blog migration");
+  await rowOf(page, "Blog migration").press("Escape");
+  await expect(page.locator("#detail h2")).toHaveText("Overview");
+  await panel("Blog migration");
+  // The keyboard walks the list too.
+  await rowOf(page, "Blog migration").press("ArrowUp");
+  await expect(page.locator("#detail h2")).toHaveText("Checkout redesign");
+  await expect(rowOf(page, "Checkout redesign")).toBeFocused();
+  // The selection is remembered.
+  await page.reload();
+  await expect(page.locator("#detail h2")).toHaveText("Checkout redesign");
+});
+
 test("marking a session done moves it to the Done tab", async () => {
-  await rowOf(page, "Checkout redesign").getByRole("button", { name: "Done", exact: true }).click();
+  await (await panel("Checkout redesign")).getByRole("button", { name: "Done", exact: true }).click();
   await expect(page.locator("#list li")).toHaveCount(2);
+  // The line that took its place is selected.
+  await expect(page.locator("#detail h2")).toHaveText("Blog migration");
   await page.locator("#tabs").getByRole("button", { name: "Done" }).click();
   await expect(titles(page)).toHaveText(["Checkout redesign"]);
   expect((await srv.session(s.web.id)).doneBy).toBe("user");
 });
 
+test("sessions of one conversation are a single line, under the latest unfinished one", async () => {
+  // The older session stopped at the message the newer one carried over and went on from.
+  const hour = 3600e3, shared = { user: "same start", extra: { uuid: "shared", timestamp: new Date(Date.now() - 9 * hour).toISOString() } };
+  addSession(w, { agentName: "Older fork", endAgo: 9 * hour, turns: [shared] });
+  const newer = addSession(w, { agentName: "Newer fork", endAgo: hour, turns: [shared, { user: "go on" }] });
+  await page.reload();
+  await expect(titles(page)).toHaveCount(4);
+  await expect(page.locator("#counts")).toContainText("4 pending");
+  await expect(rowOf(page, "Older fork")).toHaveCount(0);
+  await expect(rowOf(page, "Newer fork").locator(".fam")).toHaveText("×2");
+
+  // The panel lists the conversation's sessions; the earlier one opens there, with its own resume.
+  const d = await panel("Newer fork");
+  await expect(d.locator(".timeline .step")).toHaveCount(2);
+  await d.locator(".timeline").getByRole("button", { name: "View" }).click();
+  await expect(d.locator("h2")).toHaveText("Older fork");
+  await expect(d.getByRole("button", { name: "Resume", exact: true })).toBeVisible();
+  await expect(rowOf(page, "Newer fork")).toHaveClass(/\bsel\b/);
+
+  // Finishing the line's session leaves the unfinished one standing for the family; nothing lands in Done yet.
+  await d.locator(".timeline").getByRole("button", { name: "View" }).click();
+  await d.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(rowOf(page, "Older fork")).toHaveCount(1);
+  await expect(rowOf(page, "Newer fork")).toHaveCount(0);
+  await page.locator("#tabs").getByRole("button", { name: "Done" }).click();
+  await expect(page.locator("#list li")).toHaveCount(0);
+  expect((await srv.session(newer.id)).status).toBe("done");
+});
+
 test("a note is saved when the field loses focus", async () => {
-  const note = rowOf(page, "Rate limiter").locator("textarea");
+  const note = (await panel("Rate limiter")).locator("textarea");
   await note.fill("stopped at the gateway");
   await note.blur();
   await waitFor(async () => (await srv.session(s.api.id)).note === "stopped at the gateway");
+  await expect(rowOf(page, "Rate limiter").locator(".sub [title='stopped at the gateway']")).toHaveCount(1);
+});
+
+test("the panel shows the session's facts and how to resume it by hand", async () => {
+  const d = await panel("Rate limiter");
+  await expect(d.locator(".facts")).toContainText("acme/api");
+  await expect(d.locator(".facts")).toContainText(s.api.id.slice(0, 8));
+  await expect(d.locator(".facts")).toContainText("Priority1");
+  await expect(d.locator(".extra code")).toContainText(`claude --resume ${s.api.id}`);
 });
 
 test("the arrows reorder sessions", async () => {
@@ -105,7 +178,7 @@ test("a session not prioritized yet shows a dash, and the others keep their numb
   await page.reload();
   await expect(titles(page)).toHaveText(["Fresh one", "Rate limiter", "Checkout redesign", "Blog migration"]);
   await expect(page.locator("#list li .rank .num")).toHaveText(["—", "1", "2", "3"]);
-  await expect(rowOf(page, "Fresh one").locator(".chip", { hasText: "not prioritized" })).toHaveCount(1);
+  await expect((await panel("Fresh one")).locator(".facts")).toContainText("not prioritized");
   await expect(rowOf(page, "Fresh one").getByRole("button", { name: "↓" })).toHaveCount(0);
   // Moving a prioritized session leaves the untriaged one alone.
   await rowOf(page, "Rate limiter").getByRole("button", { name: "↓" }).click();
@@ -143,7 +216,7 @@ test("dropping on the lower half of a row places the session after it", async ()
 });
 
 test("Resume opens the session in the terminal", async () => {
-  await rowOf(page, "Rate limiter").getByRole("button", { name: "Resume", exact: true }).click();
+  await (await panel("Rate limiter")).getByRole("button", { name: "Resume", exact: true }).click();
   await waitFor(() => resumed(w, s.api.id));
 });
 
@@ -152,11 +225,13 @@ test("Close needs a second click to confirm, then stops the open session", async
   await page.reload();
   const row = rowOf(page, "Checkout redesign");
   await expect(row.locator(".live")).toBeVisible();
-  await expect(rowOf(page, "Rate limiter").getByRole("button", { name: "Close" })).toHaveCount(0);
-  await row.getByRole("button", { name: "Close" }).click();
-  await expect(row.getByRole("button", { name: "Confirm close" })).toBeVisible();
+  // Only an open session has Close.
+  await expect((await panel("Rate limiter")).getByRole("button", { name: "Close" })).toHaveCount(0);
+  const d = await panel("Checkout redesign");
+  await d.getByRole("button", { name: "Close" }).click();
+  await expect(d.getByRole("button", { name: "Confirm close" })).toBeVisible();
   expect(child.exitCode === null && child.signalCode === null).toBe(true);
-  await row.getByRole("button", { name: "Confirm close" }).click();
+  await d.getByRole("button", { name: "Confirm close" }).click();
   await waitFor(() => child.signalCode !== null || child.exitCode !== null);
   await expect(row.locator(".live")).toHaveCount(0);
 });
@@ -170,7 +245,7 @@ test("switching to Portuguese translates the page and is remembered", async () =
 });
 
 test("stopped sessions are flagged for attention; sessions in progress get a neutral mark", async () => {
-  await rowOf(page, "Checkout redesign").getByRole("button", { name: "In progress" }).click();
+  await (await panel("Checkout redesign")).getByRole("button", { name: "In progress" }).click();
   const doing = rowOf(page, "Checkout redesign"), todo = rowOf(page, "Rate limiter");
   await expect(doing).toHaveClass(/\bdoing\b/);
   const token = (name) => page.evaluate((n) => {
@@ -185,8 +260,9 @@ test("stopped sessions are flagged for attention; sessions in progress get a neu
   const [attention, progress] = [await token("--attention"), await token("--progress")];
   expect(await css(todo, "borderLeftColor")).toBe(attention);
   expect(await css(doing, "borderLeftColor")).toBe(progress);
-  expect(await css(todo.locator('[data-s="todo"]'), "color")).toBe(attention);
-  expect(await css(doing.locator('[data-s="doing"]'), "color")).toBe(progress);
+  expect(await css(page.locator('#detail [data-s="doing"]'), "color")).toBe(progress);
+  await panel("Rate limiter");
+  expect(await css(page.locator('#detail [data-s="todo"]'), "color")).toBe(attention);
 });
 
 test("Close idle tabs shows it is working until Terminal answers", async () => {

@@ -32,10 +32,11 @@ test("each session shows its account, and the list filters by account", async ()
 
 test("a session started in the wrong account moves to the right one", async () => {
   const row = rowOf(page, "Side project");
-  await row.getByText("Details").click();
-  await row.locator(".transfer select").selectOption({ label: "personal" });
-  await row.locator(".transfer input[type=checkbox]").check();
-  await row.getByRole("button", { name: "Move" }).click();
+  await row.locator(".title").click();
+  const d = page.locator("#detail");
+  await d.locator(".transfer select").selectOption({ label: "personal" });
+  await d.locator(".transfer input[type=checkbox]").check();
+  await d.getByRole("button", { name: "Move" }).click();
   await expect(rowOf(page, "Side project").locator(".acct")).toHaveText("personal");
   expect(fs.existsSync(s.wrong.file)).toBe(false);
   expect((await srv.session(s.wrong.id)).account).toBe(personal);

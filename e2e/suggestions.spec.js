@@ -18,9 +18,12 @@ async function openWithSuggestion(browserPage, confidence) {
   await waitFor(async () => { const r = await srv.session(s.id); return r.suggestion || r.status === "done"; });
   page = await srv.open(browserPage);
 }
+// The session's panel, where its suggestion is.
+const pick = () => page.locator("#list li .title").first().click();
 
 test("a suggestion shows confidence and the user's quote, and can be confirmed", async ({ page: browserPage }) => {
   await openWithSuggestion(browserPage, 0.72);
+  await pick();
   const box = page.locator(".suggest");
   await expect(box).toContainText("Looks done (72%)");
   await expect(box).toContainText("“we're done here”");
@@ -31,6 +34,7 @@ test("a suggestion shows confidence and the user's quote, and can be confirmed",
 
 test("a dismissed suggestion disappears", async ({ page: browserPage }) => {
   await openWithSuggestion(browserPage, 0.72);
+  await pick();
   await page.locator(".suggest").getByRole("button", { name: "Dismiss" }).click();
   await expect(page.locator(".suggest")).toHaveCount(0);
   await expect(page.locator("#list li")).toHaveCount(1);
@@ -42,6 +46,8 @@ test("Check for done now runs detection without waiting for the schedule", async
   page = await srv.open(browserPage);
   await expect(page.locator(".suggest")).toHaveCount(0);
   await page.getByRole("button", { name: "Check for done now" }).click();
+  await expect(page.locator("#list li .hint")).toHaveText("looks done");
+  await pick();
   await expect(page.locator(".suggest")).toContainText("Looks done (72%)");
   await page.locator("#tabs").getByRole("button", { name: "Insights" }).click();
   await expect(page.locator(".panel", { hasText: "Done detection" })).toContainText("last run");
@@ -50,6 +56,7 @@ test("Check for done now runs detection without waiting for the schedule", async
 test("an auto-marked session explains itself in the Done tab and can be reopened", async ({ page: browserPage }) => {
   await openWithSuggestion(browserPage, 0.95);
   await page.locator("#tabs").getByRole("button", { name: "Done" }).click();
+  await pick();
   await expect(page.locator(".suggest")).toContainText("Marked by Haiku (95%)");
   await page.getByRole("button", { name: "To resume" }).click();
   await expect(page.locator("#list li")).toHaveCount(0);

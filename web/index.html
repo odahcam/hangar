@@ -25,7 +25,7 @@
   --s1: #25a07f; --s2: #4f8fe6; --age1: #1f4a3d; --age2: #2f7a62; --age3: #4fb592; --age4: #9fe3c9; color-scheme: dark } }
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); }
-.wrap { max-width: 1000px; margin: 0 auto; padding: 24px 16px 64px; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
 header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 14px; }
 h1 { font-size: 20px; margin: 0; flex: 1; }
 #locale { font: 12px var(--sans); color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
@@ -36,44 +36,107 @@ nav button[aria-pressed=true] { background: var(--fg); color: var(--bg); border-
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .toolbar input, .toolbar select { font: 13px var(--sans); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
 .toolbar input { flex: 1 1 220px; min-width: 0; }
-ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-li { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; padding: 10px 12px; align-items: start; }
-li.todo { border-left: 3px solid var(--attention); }
-li.doing { border-left: 3px solid var(--progress); }
-li.done { opacity: .6; }
-li.over-before { box-shadow: 0 -4px 0 -1px var(--accent); }
-li.over-after { box-shadow: 0 4px 0 -1px var(--accent); }
-.rank { font: 500 12px var(--mono); color: var(--muted); display: flex; flex-direction: column; align-items: center; gap: 2px; user-select: none; }
+.toolbar select { max-width: 220px; text-overflow: ellipsis; }
+.split { display: grid; grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); gap: 12px; align-items: start; }
+.split.none { grid-template-columns: minmax(0, 1fr); }
+.split.none .detail { display: none; }
+ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+#list li { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; padding: 7px 10px; align-items: center; cursor: pointer; }
+#list li:hover { border-color: var(--muted); }
+#list li.sel { background: var(--accent-soft); border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+#list li:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#list li.todo { border-left: 3px solid var(--attention); }
+#list li.doing { border-left: 3px solid var(--progress); }
+#list li.done { opacity: .6; }
+#list li.done.sel { opacity: .85; }
+#list li.over-before { box-shadow: 0 -4px 0 -1px var(--accent); }
+#list li.over-after { box-shadow: 0 4px 0 -1px var(--accent); }
+.rank { font: 500 12px var(--mono); color: var(--muted); display: flex; flex-direction: column; align-items: center; justify-content: center; align-self: stretch; position: relative; user-select: none; }
+/* The arrows and the grip sit over the row, so a line is no taller for having them. */
+.rank button { position: absolute; left: 50%; transform: translateX(-50%); }
+.rank button:first-child { top: -6px; }
+.rank button:last-of-type { bottom: -6px; }
+.rank .grip { position: absolute; left: -9px; top: 50%; transform: translateY(-50%); }
 .rank.handle { cursor: grab; touch-action: none; }
-li.dragging { opacity: .5; }
+#list li.dragging { opacity: .5; }
 body.dragging { user-select: none; -webkit-user-select: none; }
 body.dragging * { cursor: grabbing !important; }
-.rank button { font: 11px var(--sans); line-height: 1; border: 0; background: none; color: var(--muted); padding: 2px 4px; cursor: pointer; border-radius: 4px; }
+.rank button { font: 10px var(--sans); line-height: 1; border: 0; background: none; color: var(--muted); padding: 1px 4px; cursor: pointer; border-radius: 4px; opacity: 0; }
+#list li:hover .rank button, #list li.sel .rank button, .rank button:focus-visible { opacity: 1; }
 .rank button:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
-.rank button:disabled { opacity: .3; cursor: default; }
-.rank .grip { font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: 4px; opacity: .6; }
-li:hover .rank .grip { opacity: 1; }
+#list li .rank button:disabled { opacity: .2; cursor: default; }
+.rank .grip { font-size: 12px; line-height: 1; padding: 1px 4px; border-radius: 4px; opacity: 0; }
+#list li:hover .rank .grip { opacity: .8; }
 .rank .grip:hover { color: var(--accent); background: var(--accent-soft); }
 .rank .num { cursor: text; padding: 1px 2px; border-radius: 4px; }
 .rank .num:hover { color: var(--fg); background: var(--line); }
 .rank input { width: 28px; font: 500 12px var(--mono); text-align: center; padding: 1px 0; color: var(--fg); background: var(--bg); border: 1px solid var(--accent); border-radius: 4px; -moz-appearance: textfield; }
 .rank input::-webkit-inner-spin-button { display: none; }
-.main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.title { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
+.main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.line { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.line .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.fam { font: 12px var(--mono); color: var(--muted); flex: none; }
+.sub { display: flex; gap: 8px; min-width: 0; overflow: hidden; white-space: nowrap; font: 12px var(--mono); color: var(--muted); }
+.sub > * { flex: none; }
+.sub > .chip { flex: 0 1 auto; min-width: 2.5em; overflow: hidden; text-overflow: ellipsis; }
+.st-icon { flex: none; display: inline-flex; align-self: center; }
+.st-icon.todo { color: var(--attention); }
+.st-icon.doing { color: var(--progress); }
+.st-icon.done { color: var(--muted); }
+.extra { border-top: 1px solid var(--line); padding-top: 12px; }
+.extra p { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font: 12px var(--mono); color: var(--muted); }
 .chip { background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 0 6px; }
+.hint { color: var(--accent); }
 .live { color: var(--live); }
 .warn { color: var(--danger); }
-.prompt { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.muted { color: var(--muted); font-size: 13px; }
+.mono { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.detail { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; min-width: 0; position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; box-sizing: border-box; }
+.d-head { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.d-title { flex: 1 1 220px; min-width: 0; }
+.d-title h2 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+.d-title .live, .d-title .muted { font: 12px var(--mono); }
+.detail .btns { justify-content: flex-start; }
+.detail .btn { font-size: 13px; padding: 6px 12px; }
+.block { display: flex; flex-direction: column; gap: 4px; }
+.k { font-size: 12px; color: var(--muted); }
+.detail .prompt { font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 9em; overflow-y: auto; }
+.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px 16px; font-size: 13px; }
+.timeline { display: flex; flex-direction: column; border-left: 2px solid var(--line); margin-left: 4px; }
+.timeline .step { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 4px 0 4px 12px; }
+.timeline .step.cur .t { font-weight: 600; }
+.timeline .t { font-size: 13px; }
+.timeline .m { font: 12px var(--mono); color: var(--muted); flex: 1; }
 details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
-details p { margin: 6px 0; font-size: 13px; overflow-wrap: anywhere; }
+details p { margin: 6px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+.btn.back-list { display: none; align-self: flex-start; }
+.btn.hide-detail { padding: 4px 8px; color: var(--muted); }
+.detail .k small { font-size: 12px; }
+.detail .hbar.pick { cursor: pointer; border-radius: 4px; }
+.detail .hbar.pick:hover { background: var(--accent-soft); }
+.cols.short { height: 72px; }
+/* The overview's sections stand apart: more air, and a rule between them. */
+.detail.overview { gap: 0; }
+.detail.overview > .block, .detail.overview > .warn-box { margin-top: 22px; }
+.detail.overview > .block + .block { border-top: 1px solid var(--line); padding-top: 22px; }
+.detail.overview > .block > .k:first-child { margin-bottom: 6px; }
+.warn-box { background: var(--attention-soft); color: var(--attention); border-radius: 6px; padding: 8px 10px; font-size: 13px; display: flex; flex-direction: column; gap: 2px; }
 textarea { width: 100%; box-sizing: border-box; font: 13px var(--sans); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; min-height: 32px; }
-.side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .status { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-.status button { font: 500 12px var(--sans); border: 0; background: transparent; color: var(--muted); padding: 4px 8px; cursor: pointer; }
+.status button { font: 500 12px var(--sans); border: 0; background: transparent; color: var(--muted); padding: 5px 9px; cursor: pointer; }
 .status button[aria-pressed=true][data-s=todo] { background: var(--attention-soft); color: var(--attention); }
 .status button[aria-pressed=true][data-s=doing] { background: var(--progress-soft); color: var(--progress); }
 .status button[aria-pressed=true][data-s=done] { background: var(--line); color: var(--fg); }
+/* Narrow: one column; the panel covers the list once a session is opened. */
+@media (max-width: 760px) {
+  .split { grid-template-columns: minmax(0, 1fr); }
+  .split:not(.detail-open) .detail { display: none; }
+  .split.detail-open #list { display: none; }
+  .split.detail-open .btn.back-list { display: inline-block; }
+  .btn.hide-detail { display: none; }
+  .detail { position: static; max-height: none; }
+}
 .btns { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .btn { font: 12px var(--sans); border: 1px solid var(--line); background: var(--surface); color: var(--fg); border-radius: 6px; padding: 4px 8px; cursor: pointer; }
 .btn:hover { border-color: var(--accent); }
@@ -123,7 +186,6 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
 .accts input[type=number] { width: 64px; font: 12px var(--sans); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
 .accts .keep { font-size: 12px; color: var(--muted); }
-.acct { border: 1px solid currentColor; border-radius: 4px; padding: 0 6px; }
 .transfer { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; margin: 6px 0; }
 .transfer select { font: 12px var(--sans); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
 .accts { display: flex; flex-direction: column; gap: 8px; }
@@ -166,7 +228,10 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
     <label class="btn"><input type="checkbox" id="suggestedOnly"> <span data-i18n="suggestedOnly"></span></label>
     <button class="btn" id="checkNow" data-i18n="checkNow"></button>
   </div>
-  <ol id="list"></ol>
+  <div class="split" id="split">
+    <ol id="list"></ol>
+    <section class="detail" id="detail" aria-live="polite"></section>
+  </div>
   <div class="empty" id="empty" hidden></div>
 </div>
 <div class="toast" id="toast" hidden></div>
@@ -272,15 +337,39 @@ function byPriority(a, b) {
   if (a.priority == null) return (b.lastAt || "").localeCompare(a.lastAt || "");
   return a.priority - b.priority;
 }
-function pendingOrder() { return items.filter((s) => s.status !== "done").sort(byPriority); }
+// Sessions that share messages (a fork, a continuation) are one line, under the most recent unfinished one: a family
+// is pending while any of it is. The others stay reachable from that line, with their own status and resume.
+let heads = new Map();
+const familyRank = (s) => (s.status === "done" ? "0" : "1") + (s.lastAt || "");
+function findHeads() {
+  heads = new Map();
+  for (const s of items) if (s.family && !(heads.has(s.family) && familyRank(heads.get(s.family)) >= familyRank(s))) heads.set(s.family, s);
+}
+const isHead = (s) => !s.family || heads.get(s.family) === s;
+const kinOf = (s) => s.family ? items.filter((x) => x.family === s.family && x !== s).sort((a, b) => (b.lastAt || "").localeCompare(a.lastAt || "")) : [];
+function pendingOrder() { return items.filter((s) => s.status !== "done" && isHead(s)).sort(byPriority); }
 // Last prompt you sent; a session without one falls back to its last activity.
 const promptAt = (s) => s.lastPromptAt || s.lastAt || "";
 const byPrompt = (a, b) => promptAt(a).localeCompare(promptAt(b));
 const byDoneAt = (a, b) => (a.doneAt || "").localeCompare(b.doneAt || "");
 
+// The list is an index, one short line per conversation; everything about the selected session is in the panel beside
+// it. On a narrow screen the panel covers the list, with a way back.
+let selectedId = null, selIndex = 0, detailOpen = false;
+try { selectedId = localStorage.getItem("selected"); } catch {}
+// Picking the selected line again closes it, and the panel goes back to the overview.
+function select(id, { openDetail = true, focus = false, toggle = false } = {}) {
+  const line = id || selectedId;
+  selectedId = toggle && id === selectedId ? null : id;
+  try { selectedId ? localStorage.setItem("selected", selectedId) : localStorage.removeItem("selected"); } catch {}
+  detailOpen = !!selectedId && (openDetail || detailOpen);
+  render();
+  if (focus) (document.querySelector("#list li.sel") || [...document.querySelectorAll("#list li")].find((li) => li.dataset.id === line))?.focus();
+}
+
 function render() {
   const ins = view === "insights", set = view === "settings";
-  $("#insights").hidden = !ins; $("#settings").hidden = !set; $("#toolbar").hidden = ins || set; $("#list").hidden = ins || set;
+  $("#insights").hidden = !ins; $("#settings").hidden = !set; $("#toolbar").hidden = ins || set; $("#split").hidden = ins || set;
   $("#tabs").hidden = set; $("#tiles").hidden = set; $("#checkNow").hidden = view !== "pending";
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-pressed", b.dataset.v === view);
   $("#settingsBtn").setAttribute("aria-pressed", set);
@@ -292,97 +381,228 @@ function render() {
   const byPrompts = $("#sort").value === "prompt";
   $("#sort").options[0].textContent = t(view === "pending" ? "sortPriority" : "sortDone");
   $("#sortDir").textContent = sortAsc() ? "↑ " + t("asc") : "↓ " + t("desc");
-  const base = items.filter((s) => (s.status === "done") === (view === "done"))
+  findHeads();
+  const base = items.filter((s) => isHead(s) && (s.status === "done") === (view === "done"))
     .sort(byPrompts ? byPrompt : view === "pending" ? byPriority : byDoneAt);
   if (!sortAsc()) base.reverse();
-  const list = base.filter((s) => (!p || s.project === p) && (!acct || s.account === acct) && (!liveOnly || s.live) && (!suggestedOnly || s.suggestion) &&
-    (!qs || [s.title, s.aiTitle, s.project, s.branch, s.firstPrompt, s.lastPrompt, s.note, s.id, accountOf(s.account)?.name].join(" ").toLowerCase().includes(qs)));
+  const matches = (s) => (!p || s.project === p) && (!acct || s.account === acct) && (!liveOnly || s.live) && (!suggestedOnly || s.suggestion) &&
+    (!qs || [s.title, s.aiTitle, s.project, s.branch, s.firstPrompt, s.lastPrompt, s.note, s.id, accountOf(s.account)?.name].join(" ").toLowerCase().includes(qs));
+  const list = base.filter((s) => [s, ...kinOf(s)].some(matches));
+  // The selection follows the session; when it leaves the list (marked done, filtered out), the line that took its
+  // place is selected. With nothing selected the panel shows the overview.
+  let sel = selectedId && byId(selectedId);
+  if (selectedId && (!sel || !list.some((s) => s === sel || s.family && s.family === sel.family))) sel = list[Math.min(selIndex, list.length - 1)] || null;
+  selectedId = sel?.id ?? null;
+  const selHead = sel && (isHead(sel) ? sel : heads.get(sel.family));
+  if (selHead) selIndex = list.indexOf(selHead);
   // Rank = place among the sessions you prioritized, so it reads the same under any filter or sort.
   // Untriaged ones have none yet: they show a dash.
   const rank = new Map(pendingOrder().filter((s) => s.priority != null).map((s, i) => [s.id, i + 1]));
-  $("#list").replaceChildren(...list.map((s) => row(s, view === "pending" ? rank.get(s.id) ?? "—" : "")));
-  for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-pressed", b.dataset.v === view);
+  $("#list").replaceChildren(...list.map((s) => row(s, view === "pending" ? rank.get(s.id) ?? "—" : "", s === selHead)));
+  $("#detail").replaceChildren(...(sel ? detail(sel) : overview()).filter(Boolean));
+  $("#detail").classList.toggle("overview", !sel);
+  $("#split").classList.toggle("detail-open", detailOpen && !!sel);
+  $("#split").classList.toggle("none", !list.length);
   $("#empty").hidden = list.length > 0;
   $("#empty").textContent = view === "pending" ? t("emptyPending") : t("emptyDone");
   const n = (f) => items.filter(f).length;
   $("#counts").textContent = t("counts", {
-    pending: n((s) => s.status !== "done"), suggested: n((s) => s.suggestion), untriaged: n((s) => s.priority == null && s.status !== "done"),
-    live: n((s) => s.live), done: n((s) => s.status === "done"),
+    pending: n((s) => isHead(s) && s.status !== "done"), suggested: n((s) => s.suggestion), untriaged: n((s) => isHead(s) && s.priority == null && s.status !== "done"),
+    live: n((s) => s.live), done: n((s) => isHead(s) && s.status === "done"),
   });
 }
 
-function row(s, rank) {
-  const reorder = reorderable();
-  const li = el("li", { class: s.status, "data-id": s.id });
-  const side = [];
-  side.push(el("div", { class: "status", role: "group", "aria-label": t("status") }, [["todo", t("statusTodo")], ["doing", t("statusDoing")], ["done", t("statusDone")]].map(([st, label]) => {
-    const b = el("button", { "data-s": st, "aria-pressed": s.status === st, text: label });
-    b.onclick = () => mutate(() => setStatus(s, st), () => api("PATCH", `/api/session/${s.id}`, { status: st }));
-    return b;
-  })));
-  const btns = [];
-  // A running session whose tab can't be brought forward gets no button: resuming it again would fork it.
-  if (!s.live || s.live.canFocus) {
-    const resume = btn(s.live ? t("goToTab") : t("resume"), "primary", () => pending(resume, t("opening"), () => api("POST", `/api/resume/${s.id}`)));
-    btns.push(resume);
-  }
-  if (s.live) {
-    let disarm;
-    const b = btn(t("close"), "danger", () => {
-      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = t("confirmClose"); disarm = setTimeout(() => { b.classList.remove("armed"); b.textContent = t("close"); }, 3000); return; }
-      clearTimeout(disarm);
-      pending(b, t("closing"), () => api("POST", `/api/close/${s.id}`), t("sessionClosed"));
-    });
-    btns.push(b);
-  }
-  side.push(el("div", { class: "btns" }, btns));
+const statusKey = { todo: "statusTodo", doing: "statusDoing", done: "statusDone" };
+const day = (iso) => iso ? new Date(iso).toLocaleDateString(LOCALE, { day: "2-digit", month: "2-digit" }) : "—";
+// The session's state at a glance: paused (to resume, needs you), half done (in progress), checked (done).
+const STATUS_ICON = {
+  todo: '<circle cx="8" cy="8" r="6.5"/><path d="M6.3 5.5v5M9.7 5.5v5"/>',
+  doing: '<circle cx="8" cy="8" r="6.5"/><path d="M8 1.5a6.5 6.5 0 0 1 0 13z" fill="currentColor" stroke="none"/>',
+  done: '<circle cx="8" cy="8" r="6.5"/><path d="M5.2 8.2l2 2 3.6-4"/>',
+};
+function statusIcon(st) {
+  const i = el("span", { class: "st-icon " + st, role: "img", title: t(statusKey[st]), "aria-label": t(statusKey[st]) });
+  i.innerHTML = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">${STATUS_ICON[st]}</svg>`;
+  return i;
+}
+// The index has room for the last two folders of the project; the full path is in its tooltip and the panel.
+const shortProject = (p) => (p || "?").split(/[\\/]/).filter(Boolean).slice(-2).join("/") || "?";
+const familyOf = (s) => s.family ? items.filter((x) => x.family === s.family).sort((a, b) => (b.lastAt || "").localeCompare(a.lastAt || "")) : [s];
+// Brings a running session's terminal forward, or opens it in a new one.
+function resumeBtn(s) {
+  const b = btn(s.live ? t("goToTab") : t("resume"), "primary", () => pending(b, t("opening"), () => api("POST", `/api/resume/${s.id}`)));
+  return b;
+}
+function closeBtn(s) {
+  let disarm;
+  const b = btn(t("close"), "danger", () => {
+    if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = t("confirmClose"); disarm = setTimeout(() => { b.classList.remove("armed"); b.textContent = t("close"); }, 3000); return; }
+    clearTimeout(disarm);
+    pending(b, t("closing"), () => api("POST", `/api/close/${s.id}`), t("sessionClosed"));
+  });
+  return b;
+}
 
-  const note = el("textarea", { id: "note-" + s.id, placeholder: t("notePlaceholder"), rows: 1 });
-  note.value = s.note || "";
-  note.onchange = () => mutate(() => { s.note = note.value; }, () => api("PATCH", `/api/session/${s.id}`, { note: note.value }), { rerender: false });
+// A line of the index: place, title (×n when the conversation spans sessions), project and the signs worth seeing
+// from afar; when.
+function row(s, rank, selected) {
+  const reorder = reorderable(), acct = accountOf(s.account), size = familyOf(s).length;
+  const li = el("li", { class: s.status + (selected ? " sel" : ""), "data-id": s.id, tabindex: 0, "aria-current": selected ? "true" : null });
+  // The rank's controls act on their own (the number swaps itself for a field, so its click arrives detached).
+  li.onclick = (e) => { if (e.target.isConnected && !e.target.closest(".rank button, .rank input, .rank .num")) select(s.id, { toggle: true }); };
+  li.onkeydown = (e) => {
+    if (e.target !== li) return;
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(s.id, { toggle: true, focus: true }); }
+    if (e.key === "Escape" && selectedId) { e.preventDefault(); select(null, { focus: true }); }
+    const next = e.key === "ArrowDown" ? li.nextElementSibling : e.key === "ArrowUp" ? li.previousElementSibling : null;
+    if (next) { e.preventDefault(); select(next.dataset.id, { openDetail: false, focus: true }); }
+  };
   li.append(
     view === "pending" ? rankCell(s, rank, reorder, li) : el("div", { class: "rank" }),
     el("div", { class: "main" }, [
-      el("div", { class: "title", text: s.title }),
-      el("div", { class: "meta" }, [
-        multi() && accountOf(s.account) ? el("span", { class: "acct", style: `color:${accountOf(s.account).color}`, text: accountOf(s.account).name }) : null,
-        el("span", { class: "chip", text: s.project || "?" }),
-        s.branch ? el("span", { text: "⎇ " + s.branch }) : null,
-        el("span", { text: $("#sort").value === "prompt" ? t("lastSent", { ago: ago(promptAt(s)) }) : t("active", { ago: ago(s.lastAt) }) }),
-        s.live ? el("span", { class: "live", text: t("open", { tty: s.live.tty || "" }) }) : null,
-        s.priority == null && s.status !== "done" ? el("span", { class: "chip", text: t("isNew") }) : null,
-        !s.transcript ? el("span", { class: s.backedUp ? "" : "warn", text: s.backedUp ? t("onlyBackup") : t("transcriptGone") }) : null,
-        s.backedUp ? el("span", { text: t("backupOk") }) : null,
-        s.alsoIn?.length ? el("span", { text: t("alsoIn", { names: s.alsoIn.map((d) => accountOf(d)?.name || d).join(", ") }) }) : null,
-        el("span", { text: s.id.slice(0, 8) }),
+      el("div", { class: "line" }, [
+        statusIcon(s.status),
+        el("span", { class: "title", text: s.title }),
+        size > 1 ? el("span", { class: "fam", title: t("famTitle", { n: size }), text: "×" + size }) : null,
       ]),
-      s.lastPrompt ? el("div", { class: "prompt", text: "› " + s.lastPrompt }) : null,
-      s.suggestion ? el("div", { class: "suggest" }, [
-        el("div", {}, [el("b", { text: t("looksDone", { pct: Math.round(s.suggestion.confidence * 100) }) }), " — " + s.suggestion.reason]),
-        s.suggestion.evidence ? el("div", { class: "quote", text: "“" + s.suggestion.evidence + "”" + (s.suggestion.quoted ? "" : t("quoteNotFound")) }) : null,
-        el("div", { class: "btns" }, [
-          btn(t("confirmDone"), "primary", () => mutate(() => setStatus(s, "done", "suggestion"),
-            () => api("PATCH", `/api/session/${s.id}`, { status: "done", via: "suggestion" }), { ok: t("doneToast") })),
-          btn(t("dismiss"), "", () => mutate(() => { s.suggestion = null; }, () => api("POST", `/api/dismiss-suggestion/${s.id}`))),
-        ]),
-      ]) : null,
-      s.autoVerdict ? el("div", { class: "suggest" }, [
-        el("div", {}, [el("b", { text: t("markedByHaiku", { pct: Math.round(s.autoVerdict.confidence * 100) }) }), " — " + s.autoVerdict.reason + t("wrongReopen")]),
-        el("div", { class: "quote", text: "“" + s.autoVerdict.evidence + "”" }),
-      ]) : null,
-      note,
-      el("details", {}, [
-        el("summary", { text: t("details") }),
-        s.aiTitle ? el("p", { text: t("aiTitle", { v: s.aiTitle }) }) : null,
-        el("p", { text: t("firstPrompt", { v: s.firstPrompt || "—" }) }),
-        el("p", { text: t("promptsCwd", { n: s.prompts, cwd: s.cwd }) }),
-        el("p", {}, [el("code", { text: `cd '${s.cwd}' && ${s.account && !accountOf(s.account)?.default ? `CLAUDE_CONFIG_DIR='${s.account}' ` : ""}claude --resume ${s.id}` })]),
-        multi() ? transferControl(s) : null,
+      // One line, cut short when it doesn't fit: the project, open or not, when, and the signs worth seeing from afar.
+      el("div", { class: "sub" }, [
+        el("span", { class: "chip", title: s.cwd || s.project, text: shortProject(s.project) }),
+        s.live ? el("span", { class: "live", text: t("open", { tty: s.live.tty || "" }) }) : null,
+        el("span", { text: ago($("#sort").value === "prompt" ? promptAt(s) : s.lastAt) }),
+        s.suggestion ? el("span", { class: "hint", text: t("hasSuggestion") }) : null,
+        s.note ? el("span", { title: s.note, "aria-label": t("noteLabel"), text: "✎" }) : null,
+        !s.transcript ? el("span", { class: s.backedUp ? "" : "warn", text: s.backedUp ? t("onlyBackup") : t("transcriptGone") }) : null,
+        multi() && acct ? el("span", { class: "acct", style: `color:${acct.color}`, text: acct.name }) : null,
       ]),
     ]),
-    el("div", { class: "side" }, side),
   );
   return li;
+}
+
+// The selected session: status and what to do first, then what it was about, your note, the facts, and the other
+// sessions of the same conversation.
+function detail(s) {
+  const acct = accountOf(s.account), fam = familyOf(s);
+  const status = el("div", { class: "status", role: "group", "aria-label": t("status") }, ["todo", "doing", "done"].map((st) => {
+    const b = el("button", { "data-s": st, "aria-pressed": s.status === st, text: t(statusKey[st]) });
+    b.onclick = () => mutate(() => setStatus(s, st), () => api("PATCH", `/api/session/${s.id}`, { status: st }));
+    return b;
+  }));
+  const note = el("textarea", { id: "note-" + s.id, placeholder: t("notePlaceholder"), rows: 2, "aria-label": t("noteLabel") });
+  note.value = s.note || "";
+  note.onchange = () => mutate(() => { s.note = note.value; }, () => api("PATCH", `/api/session/${s.id}`, { note: note.value }), { rerender: false });
+  const fact = (k, v, attrs = {}) => v == null || v === "" ? null : el("div", {}, [el("div", { class: "k", text: t(k) }), el("div", { ...attrs, text: v })]);
+  const cmd = `cd '${s.cwd}' && ${s.account && !acct?.default ? `CLAUDE_CONFIG_DIR='${s.account}' ` : ""}claude --resume ${s.id}`;
+  const back = btn(t("backToList"), "back-list", () => { detailOpen = false; render(); document.querySelector("#list li.sel")?.focus(); });
+  const hide = btn("✕", "hide-detail", () => select(null, { focus: true }));
+  hide.title = t("hideDetail");
+  hide.setAttribute("aria-label", t("hideDetail"));
+  return [
+    back,
+    el("div", { class: "d-head" }, [
+      el("div", { class: "d-title" }, [
+        el("h2", { text: s.title }),
+        el("div", { class: s.live ? "live" : "muted", text: s.live ? t("isOpen") : t("notOpen") }),
+      ]),
+      status,
+      hide,
+    ]),
+    el("div", { class: "btns" }, [
+      // A running session whose terminal can't be brought forward gets no button: resuming it again would fork it.
+      !s.live || s.live.canFocus ? resumeBtn(s) : el("span", { class: "muted", text: t("openElsewhere") }),
+      s.live ? closeBtn(s) : null,
+    ]),
+    s.suggestion ? el("div", { class: "suggest" }, [
+      el("div", {}, [el("b", { text: t("looksDone", { pct: Math.round(s.suggestion.confidence * 100) }) }), " — " + s.suggestion.reason]),
+      s.suggestion.evidence ? el("div", { class: "quote", text: "“" + s.suggestion.evidence + "”" + (s.suggestion.quoted ? "" : t("quoteNotFound")) }) : null,
+      el("div", { class: "btns" }, [
+        btn(t("confirmDone"), "primary", () => mutate(() => setStatus(s, "done", "suggestion"),
+          () => api("PATCH", `/api/session/${s.id}`, { status: "done", via: "suggestion" }), { ok: t("doneToast") })),
+        btn(t("dismiss"), "", () => mutate(() => { s.suggestion = null; }, () => api("POST", `/api/dismiss-suggestion/${s.id}`))),
+      ]),
+    ]) : null,
+    s.autoVerdict ? el("div", { class: "suggest" }, [
+      el("div", {}, [el("b", { text: t("markedByHaiku", { pct: Math.round(s.autoVerdict.confidence * 100) }) }), " — " + s.autoVerdict.reason + t("wrongReopen")]),
+      el("div", { class: "quote", text: "“" + s.autoVerdict.evidence + "”" }),
+    ]) : null,
+    el("div", { class: "block" }, [el("div", { class: "k", text: t("lastPromptLabel") }), el("div", { class: "prompt", text: s.lastPrompt || "—" })]),
+    el("label", { class: "block" }, [el("span", { class: "k", text: t("noteLabel") }), note]),
+    el("div", { class: "facts" }, [
+      s.status !== "done" && isHead(s) ? fact("fPriority", s.priority == null ? t("isNew") : String(triaged().indexOf(s.id) + 1)) : null,
+      fact("fProject", shortProject(s.project), { class: "mono", title: s.cwd || s.project }),
+      acct ? fact("fAccount", acct.name, { style: `color:${acct.color}` }) : null,
+      fact("fBranch", s.branch, { class: "mono" }),
+      fact("fActivity", `${ago(s.lastAt)} · ${t(s.prompts === 1 ? "nPrompt1" : "nPrompts", { n: s.prompts })}`),
+      fact("fBackup", !s.transcript ? (s.backedUp ? t("onlyBackup") : t("transcriptGone")) : s.backedUp ? t("backupSaved") : t("backupNone"), { class: !s.transcript && !s.backedUp ? "warn" : "" }),
+      fact("fId", s.id.slice(0, 8), { class: "mono", title: s.id }),
+      s.alsoIn?.length ? fact("fAlsoIn", s.alsoIn.map((d) => accountOf(d)?.name || d).join(", ")) : null,
+    ]),
+    multi() ? transferControl(s) : null,
+    fam.length > 1 ? el("div", { class: "block" }, [
+      el("div", { class: "k", text: t("thisConversation") }),
+      el("div", { class: "timeline" }, fam.map((k, i) => el("div", { class: "step" + (k === s ? " cur" : "") }, [
+        el("span", { class: "t", text: (i === 0 ? t("latest") : t("earlier")) + (k.title !== s.title ? " · " + k.title : "") }),
+        el("span", { class: "m", text: `${day(k.firstAt)} – ${day(k.lastAt)} · ${t(statusKey[k.status])}${k.live ? " · " + t("openShort") : ""}` }),
+        k === s ? null : btn(t("view"), "", () => select(k.id)),
+      ]))),
+    ]) : null,
+    el("div", { class: "block extra" }, [
+      el("div", { class: "k", text: t("moreInfo") }),
+      s.aiTitle ? el("p", { text: t("aiTitle", { v: s.aiTitle }) }) : null,
+      el("p", { text: t("firstPrompt", { v: s.firstPrompt || "—" }) }),
+      el("p", { class: "mono", text: s.cwd || "—" }),
+      el("p", {}, [el("code", { text: cmd })]),
+    ]),
+  ];
+}
+
+// With no session selected the panel shows a few insights: what holds memory, where the pending work is and how old,
+// how busy the last two weeks were, and what risks being lost. Same data as the tiles; the Insights tab has the rest.
+function overview() {
+  const d = lastInsights;
+  const head = el("div", { class: "d-head" }, [
+    el("div", { class: "d-title" }, [el("h2", { text: t("overviewTitle") }), el("div", { class: "muted", text: t("overviewSub") })]),
+    btn(t("allInsights"), "", () => showView("insights")),
+  ]);
+  if (!d) return [head, el("div", { class: "muted", text: t("loading") })];
+  const section = (title, sub, kids) => el("div", { class: "block" }, [el("div", { class: "k" }, [title, sub ? el("small", { text: " · " + sub }) : null]), ...kids]);
+
+  const idle = d.memory.sessions.filter((s) => s.idleHours >= 24);
+  const open = [...d.memory.sessions].sort((a, b) => b.mb - a.mb).slice(0, 5);
+  const maxMb = Math.max(1, ...open.map((s) => s.mb));
+  const memRows = open.map((s) => {
+    const r = hbar([acctDot(s.account), (s.idleHours >= 24 ? "◌ " : "") + s.title], [seg(s.mb, maxMb, s.idleHours >= 24 ? "--age1" : "--s1", `${s.mb} MB`)],
+      `${s.mb} MB · ${s.idleHours}h`, s.idleHours >= 24 ? t("idleFor", { h: s.idleHours }) : "");
+    // A line of this list opens its session, when the list has it.
+    if (byId(s.id)) { r.classList.add("pick"); r.onclick = () => select(s.id); }
+    return r;
+  });
+
+  const ages = [["--age1", t("age1")], ["--age2", t("age2")], ["--age3", t("age3")], ["--age4", t("age4")]];
+  const projects = d.byProject.slice(0, 6), maxP = Math.max(1, ...projects.map((p) => p.total));
+  const projRows = projects.map((p) => hbar(shortProject(p.project),
+    ["d1", "d7", "d14", "older"].map((k, i) => seg(p[k], maxP, ages[i][0], `${ages[i][1]}: ${p[k]}`)), String(p.total), p.project));
+
+  const byDay = Object.fromEntries(d.activity.map((a) => [a.day, a.n]));
+  const days = [...Array(14)].map((_, i) => new Date(Date.now() - (13 - i) * 864e5).toLocaleDateString("sv-SE"));
+  const maxA = Math.max(1, ...days.map((x) => byDay[x] || 0));
+  const activity = el("div", { class: "cols short" }, days.map((x) => {
+    const n = byDay[x] || 0;
+    return el("div", { class: "c", title: `${x}: ${n} prompts` }, [el("span", { style: `height:${(n / maxA) * 100}%;background:var(--s1)` })]);
+  }));
+
+  const st = d.storage, risks = [
+    st.pendingWithoutBackup.length ? t("riskNoBackup", { n: st.pendingWithoutBackup.length }) : null,
+    st.expiringSoon.length ? t("riskExpiring", { n: st.expiringSoon.length }) : null,
+  ].filter(Boolean);
+  return [
+    head,
+    risks.length ? el("div", { class: "warn-box" }, risks.map((r) => el("div", { text: "⚠ " + r }))) : null,
+    open.length ? section(t("pOpenRam"), idle.length ? t("pOpenRamIdle", { n: idle.length, mb: fmtMb(idle.reduce((a, s) => a + s.mb, 0)) }) : t("pOpenRamSub"), memRows) : null,
+    projects.length ? section(t("pByProject"), t("pByProjectSub"), [legend(ages), ...projRows]) : null,
+    section(t("pPerDay"), t("last14"), [activity, el("div", { class: "axis" }, [el("span", { text: days[0].slice(5) }), el("span", { text: t("today") })])]),
+  ];
 }
 
 // Dragging by the rank column, on pointer events rather than HTML5 drag and drop: the desktop app's webview window
@@ -463,8 +683,11 @@ function transferControl(s) {
     t(rm.checked ? "movedTo" : "copiedTo", { name: accountOf(sel.value)?.name })));
   rm.onchange = () => { go.textContent = t(rm.checked ? "move" : "copy"); };
   if (s.live) { go.disabled = true; go.title = t("err_open"); }
-  return el("div", { class: "transfer" }, [el("span", { text: t("transferTo") }), sel,
-    el("label", {}, [rm, " " + t("removeFrom", { name: accountOf(s.account)?.name || "" })]), go]);
+  return el("div", { class: "block" }, [
+    el("div", { class: "k", text: t("transferTitle") }),
+    el("div", { class: "transfer" }, [sel, el("label", {}, [rm, " " + t("removeFrom", { name: accountOf(s.account)?.name || "" })]), go]),
+    s.live ? el("div", { class: "muted", text: t("err_open") }) : null,
+  ]);
 }
 
 // The order you set: prioritized pending sessions only, filters ignored. Untriaged ones stay out of it until placed,
@@ -527,17 +750,17 @@ function legend(entries) { return el("div", { class: "legend" }, entries.map(([c
 
 // The headline tiles sit above every view; they come from /api/insights, fetched apart from the list so it never waits on them.
 let lastInsights = null;
-// Counts that follow local edits are recomputed from the list; the rest (memory, tokens) waits for the next fetch.
-function refreshTiles() {
-  if (!lastInsights) return;
-  const n = (f) => items.filter(f).length;
-  renderTiles({ ...lastInsights, totals: { ...lastInsights.totals,
-    pending: n((s) => s.status !== "done"), untriaged: n((s) => s.status !== "done" && s.priority == null),
-    done: n((s) => s.status === "done"), suggestions: n((s) => s.status !== "done" && s.suggestion) } });
-}
+// Counts that follow local edits come from the list, a conversation counted once as in the header; the rest
+// (memory, tokens) waits for the next fetch.
+function refreshTiles() { if (lastInsights) renderTiles(lastInsights); }
 function renderTiles(d) {
   lastInsights = d;
-  const tot = d.totals, m = d.memory;
+  if ($("#detail").classList.contains("overview") && !$("#split").hidden) $("#detail").replaceChildren(...overview().filter(Boolean));
+  const m = d.memory, n = (f) => items.filter(f).length;
+  findHeads();
+  const tot = items.length ? { ...d.totals,
+    pending: n((s) => isHead(s) && s.status !== "done"), untriaged: n((s) => isHead(s) && s.status !== "done" && s.priority == null),
+    done: n((s) => isHead(s) && s.status === "done"), suggestions: n((s) => s.status !== "done" && s.suggestion) } : d.totals;
   $("#tiles").replaceChildren(...[
     tile(tot.pending, t("tilePending", { n: tot.untriaged })),
     tile(tot.live, t("tileLive")),

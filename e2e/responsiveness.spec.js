@@ -26,15 +26,20 @@ test.afterEach(async () => { await srv?.stop(); srv = null; cleanup(w); });
 
 const rowOf = (page, title) => page.locator("#list li", { has: page.locator(".title", { hasText: title }) });
 const titles = (page) => page.locator("#list li .title");
+const panel = async (page, title) => {
+  const r = rowOf(page, title);
+  if (!/\bsel\b/.test(await r.getAttribute("class"))) await r.locator(".title").click();
+  return page.locator("#detail");
+};
 
 test("a status change shows immediately and is saved", async () => {
-  await rowOf(page, "Bravo").getByRole("button", { name: "In progress" }).click();
+  await (await panel(page, "Bravo")).getByRole("button", { name: "In progress" }).click();
   await expect(rowOf(page, "Bravo")).toHaveClass(/\bdoing\b/, QUICK);
   await waitFor(async () => (await srv.session(s.b.id)).status === "doing", { timeout: SLOW_MS * 3 });
 });
 
 test("marking done removes the row immediately", async () => {
-  await rowOf(page, "Bravo").getByRole("button", { name: "Done", exact: true }).click();
+  await (await panel(page, "Bravo")).getByRole("button", { name: "Done", exact: true }).click();
   await expect(titles(page)).toHaveText(["Alpha", "Charlie"], QUICK);
   await waitFor(async () => (await srv.session(s.b.id)).status === "done", { timeout: SLOW_MS * 3 });
 });
@@ -57,12 +62,12 @@ test("dragging reorders immediately", async () => {
 });
 
 test("Resume shows it is working until Terminal answers", async () => {
-  const resume = rowOf(page, "Alpha").getByRole("button", { name: "Resume", exact: true });
-  await resume.click();
-  const busy = rowOf(page, "Alpha").getByRole("button", { name: "Opening…" });
+  const d = await panel(page, "Alpha");
+  await d.getByRole("button", { name: "Resume", exact: true }).click();
+  const busy = d.getByRole("button", { name: "Opening…" });
   await expect(busy).toBeDisabled(QUICK);
   await expect(busy).toHaveAttribute("aria-busy", "true");
-  await expect(rowOf(page, "Alpha").getByRole("button", { name: "Resume", exact: true })).toBeEnabled({ timeout: SLOW_MS * 4 });
+  await expect(d.getByRole("button", { name: "Resume", exact: true })).toBeEnabled({ timeout: SLOW_MS * 4 });
 });
 
 test("Close shows it is working until the session has stopped", async () => {
@@ -71,17 +76,17 @@ test("Close shows it is working until the session has stopped", async () => {
   addLive(w, s.b);
   await page.reload();
   await srv.slow(page, SLOW_MS);
-  const row = rowOf(page, "Bravo");
-  await row.getByRole("button", { name: "Close" }).click();
-  await row.getByRole("button", { name: "Confirm close" }).click();
-  await expect(row.getByRole("button", { name: "Closing…" })).toBeDisabled(QUICK);
-  await expect(row.locator(".live")).toHaveCount(0, { timeout: SLOW_MS * 4 });
+  const d = await panel(page, "Bravo");
+  await d.getByRole("button", { name: "Close" }).click();
+  await d.getByRole("button", { name: "Confirm close" }).click();
+  await expect(d.getByRole("button", { name: "Closing…" })).toBeDisabled(QUICK);
+  await expect(rowOf(page, "Bravo").locator(".live")).toHaveCount(0, { timeout: SLOW_MS * 4 });
 });
 
 test("a change the server rejects is rolled back with a message", async () => {
   await srv.slow(page, 0);
   await srv.fail(page, "/api/session/", "boom");
-  await rowOf(page, "Bravo").getByRole("button", { name: "In progress" }).click();
+  await (await panel(page, "Bravo")).getByRole("button", { name: "In progress" }).click();
   await expect(page.locator("#toast")).toContainText("boom");
   await expect(rowOf(page, "Bravo")).toHaveClass(/\btodo\b/);
   expect((await srv.session(s.b.id)).status).toBe("todo");
