@@ -86,8 +86,10 @@ pub fn scan_file(db: &Connection, file: &Path) -> rusqlite::Result<bool> {
     };
     if fresh {
         db::clear_activity(db, &id)?;
+        db::clear_msgs(db, &id)?;
     }
     let mut days: BTreeMap<String, i64> = BTreeMap::new();
+    let mut msgs: Vec<(String, Option<String>)> = Vec::new();
     let mut f = match fs::File::open(file) {
         Ok(f) => f,
         Err(_) => return Ok(false),
@@ -121,6 +123,9 @@ pub fn scan_file(db: &Connection, file: &Path) -> rusqlite::Result<bool> {
             set_str(&mut row.agent_name, &rec.unwrap()["agentName"]);
         } else if kind == "user" {
             let rec = rec.unwrap();
+            if let Some(uuid) = rec["uuid"].as_str() {
+                msgs.push((uuid.to_string(), rec["timestamp"].as_str().map(String::from)));
+            }
             set_str(&mut row.cwd, &rec["cwd"]);
             set_str(&mut row.branch, &rec["gitBranch"]);
             set_str(&mut row.last_at, &rec["timestamp"]);
@@ -164,10 +169,14 @@ pub fn scan_file(db: &Connection, file: &Path) -> rusqlite::Result<bool> {
     }
     row.mtime = mtime;
     row.size = size;
-    db::put_t(db, &row)?;
+    // One transaction per file: a long transcript has thousands of messages, and a commit each would crawl.
+    let tx = db.unchecked_transaction()?;
+    db::put_t(&tx, &row)?;
     for (day, n) in days {
-        db::add_activity(db, &id, &day, n)?;
+        db::add_activity(&tx, &id, &day, n)?;
     }
+    db::add_msgs(&tx, &id, &msgs)?;
+    tx.commit()?;
     Ok(true)
 }
 

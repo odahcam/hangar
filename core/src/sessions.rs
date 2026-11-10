@@ -108,14 +108,18 @@ impl Hangar {
     }
 
     pub(crate) fn list_sessions(&self) -> ApiResult<Vec<Value>> {
-        let (states, verdicts, mut transcripts, copies, accounts) = {
+        let (states, verdicts, mut transcripts, copies, accounts, families) = {
             let db = self.db();
             let copies = self.scan_all(&db)?;
-            (db::all_s(&db)?, db::all_v(&db)?, db::all_t(&db)?, copies, self.accounts_in(&db)?)
+            (db::all_s(&db)?, db::all_v(&db)?, db::all_t(&db)?, copies, self.accounts_in(&db)?, db::families(&db)?)
         };
         let account_of = |file: &str| accounts.iter().find(|a| Path::new(file).starts_with(&a.dir));
         // A hidden account's sessions leave the list with it; one whose folder is no longer an account stays, unattributed.
         transcripts.retain(|t| !account_of(&t.file).is_some_and(|a| a.hidden));
+        let mut family_size: HashMap<&str, usize> = HashMap::new();
+        for f in transcripts.iter().filter_map(|t| families.get(&t.id)) {
+            *family_size.entry(f.as_str()).or_default() += 1;
+        }
         let (live, tabs) = std::thread::scope(|s| {
             let tabs = s.spawn(|| self.platform.tabs());
             (self.live_sessions(), tabs.join().unwrap_or_default())
@@ -157,6 +161,7 @@ impl Hangar {
                     "id": t.id,
                     "account": account_of(&t.file).map(|a| a.key.as_str()),
                     "alsoIn": also_in,
+                    "family": families.get(&t.id).filter(|f| family_size[f.as_str()] > 1),
                     "title": title,
                     "aiTitle": t.ai_title,
                     "project": project,

@@ -1,8 +1,9 @@
 // SQLite state. The schema matches the Node server's state.db exactly, so existing installs keep their data.
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use std::collections::HashMap;
 
-// transcript/activity are derived caches: on a schema bump they are dropped and rebuilt from the jsonl files.
-const SCHEMA: &str = "3";
+// transcript/activity/msg are derived caches: on a schema bump they are dropped and rebuilt from the jsonl files.
+const SCHEMA: &str = "5";
 
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let db = Connection::open(path)?;
@@ -18,7 +19,7 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
           dir text primary key, name text, color text, added integer not null default 0, hidden integer not null default 0);",
     )?;
     if get_meta(&db, "schema")?.as_deref() != Some(SCHEMA) {
-        db.execute_batch("drop table if exists transcript; drop table if exists activity;")?;
+        db.execute_batch("drop table if exists transcript; drop table if exists activity; drop table if exists msg;")?;
         set_meta(&db, "schema", SCHEMA)?;
     }
     db.execute_batch(
@@ -29,6 +30,7 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
           tokens_in integer not null default 0, tokens_cache integer not null default 0, tokens_out integer not null default 0,
           last_msg text, last_in integer, last_cache integer, last_out integer);
         create table if not exists activity (id text not null, day text not null, n integer not null, primary key (id, day));
+        create table if not exists msg (uuid text not null, id text not null, at text, primary key (uuid, id)) without rowid;
         create table if not exists verdict (
           id text primary key, offset integer not null, done integer not null, confidence real not null, evidence text, reason text,
           quoted integer not null, dismissed integer not null default 0, cost_usd real, at text not null, error text);",
@@ -125,6 +127,50 @@ pub fn activity_since(db: &Connection, day: &str) -> rusqlite::Result<Vec<(Strin
     db.prepare("select day, sum(n) as n from activity where day >= ? group by day order by day")?
         .query_map([day], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect()
+}
+
+pub fn clear_msgs(db: &Connection, id: &str) -> rusqlite::Result<()> {
+    db.execute("delete from msg where id = ?", [id]).map(drop)
+}
+
+/// The session's user messages: (uuid, timestamp).
+pub fn add_msgs(db: &Connection, id: &str, msgs: &[(String, Option<String>)]) -> rusqlite::Result<()> {
+    let mut insert = db.prepare_cached("insert or ignore into msg (uuid, id, at) values (?, ?, ?)")?;
+    for (uuid, at) in msgs {
+        insert.execute(params![uuid, id, at])?;
+    }
+    Ok(())
+}
+
+/// One conversation in several sessions: two sessions that share messages are the same conversation when one of them
+/// stopped where the other went on (a copy with nothing of its own, or a continuation after compacting). A fork where
+/// both kept going after the split is separate work. Families chain through such pairs; each session maps to its
+/// family's smallest id.
+pub fn families(db: &Connection) -> rusqlite::Result<HashMap<String, String>> {
+    fn root(parent: &HashMap<String, String>, id: &str) -> String {
+        let mut at = id;
+        while let Some(next) = parent.get(at).filter(|n| *n != at) {
+            at = next;
+        }
+        at.to_string()
+    }
+    let mut parent: HashMap<String, String> = HashMap::new();
+    let mut pairs = db.prepare(
+        "with pair as (select a.id as x, b.id as y, max(max(coalesce(a.at, ''), coalesce(b.at, ''))) as split from msg a join msg b on a.uuid = b.uuid and a.id < b.id group by a.id, b.id),
+          tip as (select id, max(at) as at from msg group by id)
+        select x, y from pair join tip tx on tx.id = pair.x join tip ty on ty.id = pair.y where tx.at <= pair.split or ty.at <= pair.split",
+    )?;
+    for row in pairs.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+        let (x, y) = row?;
+        parent.entry(x.clone()).or_insert_with(|| x.clone());
+        parent.entry(y.clone()).or_insert_with(|| y.clone());
+        let (a, b) = (root(&parent, &x), root(&parent, &y));
+        if a != b {
+            let (low, high) = if a < b { (a, b) } else { (b, a) };
+            parent.insert(high, low);
+        }
+    }
+    Ok(parent.keys().map(|k| (k.clone(), root(&parent, k))).collect())
 }
 
 #[derive(Clone)]

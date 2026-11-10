@@ -46,6 +46,40 @@ test("reads cwd and branch from the transcript", async () => {
   assert.equal(row.branch, "feat/x");
 });
 
+// A message copied into another session keeps its uuid and timestamp.
+const m = (uuid, hoursAgo) => ({ user: uuid, extra: { uuid, timestamp: new Date(Date.now() - hoursAgo * HOUR).toISOString() } });
+
+test("a session that stopped where another went on is the same conversation, through a chain too", async () => {
+  const original = addSession(w, { turns: [m("a", 9), m("b", 8)] });
+  const continuation = addSession(w, { turns: [m("b", 8), m("c", 5)] });
+  const next = addSession(w, { turns: [m("c", 5), m("d", 1)] });
+  const copy = addSession(w, { turns: [m("a", 9)] });
+  const unrelated = addSession(w, { turns: [m("z", 3)] });
+  srv = await startServer(w);
+  const family = (await srv.session(original.id)).family;
+  assert.ok(family);
+  for (const s of [continuation, next, copy]) assert.equal((await srv.session(s.id)).family, family);
+  assert.equal((await srv.session(unrelated.id)).family, null);
+});
+
+test("a fork where both sides kept going is separate work", async () => {
+  const original = addSession(w, { turns: [m("a", 9), m("own", 2)] });
+  const fork = addSession(w, { turns: [m("a", 9), m("fork-own", 1)] });
+  srv = await startServer(w);
+  assert.equal((await srv.session(original.id)).family, null);
+  assert.equal((await srv.session(fork.id)).family, null);
+});
+
+test("a link that appears later in a growing transcript is picked up", async () => {
+  const a = addSession(w, { turns: [m("a1", 3)] });
+  const b = addSession(w, { turns: [m("b1", 4)] });
+  srv = await startServer(w);
+  assert.equal((await srv.session(a.id)).family, null);
+  const copied = m("a1", 3).extra;
+  fs.appendFileSync(b.file, JSON.stringify({ type: "user", cwd: b.cwd, sessionId: b.id, message: { role: "user", content: "copied" }, ...copied }) + "\n");
+  assert.ok((await srv.session(a.id)).family);
+});
+
 test("project label drops the directory every session shares", async () => {
   const a = addSession(w, { cwd: "/work/acme/api", turns: [{ user: "a" }] });
   const b = addSession(w, { cwd: "/work/side/blog", turns: [{ user: "b" }] });
