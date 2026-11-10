@@ -151,7 +151,8 @@ impl Hangar {
                 // canFocus: Resume can bring this session's own tab forward (otherwise it would open a second copy).
                 let live = l.map(|l| {
                     let mut o = json!({ "pid": l.pid, "canFocus": caps.focus && l.tty.is_some() });
-                    if let Some(tty) = &l.tty {
+                    // Where the terminal has no tabs to list, the handle is no tty to show (Windows: the pid).
+                    if let Some(tty) = l.tty.as_ref().filter(|_| caps.tabs) {
                         o["tty"] = json!(tty);
                     }
                     o
@@ -210,8 +211,10 @@ impl Hangar {
                 return Ok(json!({ "focused": tty }));
             }
         }
-        // Resuming a session that is still running elsewhere would fork it; only a tab we can't find any more is reopened.
-        if live.is_some() && !self.platform.caps().focus {
+        // Resuming a session that is still running elsewhere would fork it; only a tab we can't find any more is reopened,
+        // and only a terminal that lists its tabs can tell it is gone.
+        let caps = self.platform.caps();
+        if live.is_some() && !(caps.focus && caps.tabs) {
             return Err(ApiError(409, "already_open".into()));
         }
         let saved = self.backup_dir.join(format!("{id}.jsonl"));

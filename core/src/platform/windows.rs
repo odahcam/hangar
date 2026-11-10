@@ -1,7 +1,8 @@
-// Windows: sessions open as Windows Terminal tabs. Windows Terminal can't list its tabs or select one from outside,
-// so there is no tab focus or idle-tab cleanup here.
+// Windows: sessions open as Windows Terminal tabs. Windows Terminal can't list its tabs from outside, so there is no
+// idle-tab cleanup here. A running session is still brought forward: its console's window leads to the terminal
+// window that hosts it, and UI Automation selects the tab whose title is that console's title.
 use super::{Caps, Platform, Tab};
-use crate::proc::{command, run, SESSION_ENV};
+use crate::proc::{command, run, run_with, SESSION_ENV};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -14,7 +15,7 @@ static WT: LazyLock<String> = LazyLock::new(|| std::env::var("HANGAR_WT").unwrap
 
 impl Platform for Windows {
     fn caps(&self) -> Caps {
-        Caps { tabs: false, focus: false }
+        Caps { tabs: false, focus: true }
     }
 
     fn data_dir(&self, home: &Path) -> PathBuf {
@@ -33,12 +34,20 @@ impl Platform for Windows {
         HashMap::new()
     }
 
-    fn ttys(&self, _: &[u32]) -> HashMap<u32, String> {
-        HashMap::new()
+    // There are no ttys; a session that sits in a terminal window gets its own pid as the handle focus() takes.
+    fn ttys(&self, pids: &[u32]) -> HashMap<u32, String> {
+        let (parents, consoles) = (crate::proc::parents().into_iter().collect(), win::console_windows());
+        pids.iter().filter(|&&pid| terminal_window(pid, &parents, &consoles).is_some()).map(|&pid| (pid, pid.to_string())).collect()
     }
 
-    fn focus(&self, _: &str) -> bool {
-        false
+    fn focus(&self, tty: &str) -> bool {
+        let Ok(pid) = tty.parse::<u32>() else { return false };
+        let (parents, consoles) = (crate::proc::parents().into_iter().collect(), win::console_windows());
+        let Some(window) = terminal_window(pid, &parents, &consoles) else { return false };
+        win::bring_forward(window);
+        // Picking the tab takes PowerShell's start-up (~0.5 s); the window is already in front meanwhile.
+        std::thread::spawn(move || select_tab(pid, window));
+        true
     }
 
     // A new tab in the most recent Windows Terminal window; without Windows Terminal, a console window of its own.
@@ -81,9 +90,153 @@ impl Platform for Windows {
     }
 }
 
+// The terminal window a session runs in. The console the process is attached to decides: walking up from it, the
+// first process with a console names it (its host), and only windows of that console count, so a session started
+// from inside another terminal session doesn't lead to that one's window. Under ConPTY (Windows Terminal) the
+// console's window is a hidden pseudo-window filed under the console's first client (the shell), owned by the
+// terminal window; a classic console window belongs to its host and is the window itself.
+fn terminal_window(pid: u32, parents: &HashMap<u32, u32>, consoles: &[win::ConsoleWindow]) -> Option<isize> {
+    let mut chain = vec![pid];
+    while let Some(&p) = parents.get(chain.last()?).filter(|&&p| p != 0 && !chain.contains(&p) && chain.len() < 16) {
+        chain.push(p);
+    }
+    let first = chain.iter().position(|&p| win::console_host(p).is_some())?;
+    let host = win::console_host(chain[first])?;
+    let same: Vec<u32> = chain[first..].iter().copied().take_while(|&p| win::console_host(p) == Some(host)).collect();
+    let mine = |w: &&win::ConsoleWindow| w.pid == host || (w.pseudo && same.contains(&w.pid));
+    consoles.iter().find(mine).and_then(win::terminal_of)
+}
+
+// Selects, in the terminal window, the tab whose title is the session's console title (what Windows Terminal shows).
+// Reading another process's console title means attaching to its console, which this process can't do while it has
+// one of its own; the PowerShell helper starts with a hidden console it can let go of. A leading status glyph
+// ("✳ ", "◑ ") may change between the two reads, so a second pass compares without it.
+const SELECT_TAB: &str = r#"
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+Add-Type -Namespace Hangar -Name Con -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern bool FreeConsole();
+[DllImport("kernel32.dll")] public static extern bool AttachConsole(uint pid);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern int GetConsoleTitleW(System.Text.StringBuilder s, int n);
+'@
+[void][Hangar.Con]::FreeConsole()
+if (-not [Hangar.Con]::AttachConsole([uint32]$env:HANGAR_FOCUS_PID)) { exit 2 }
+$sb = New-Object System.Text.StringBuilder 1024
+[void][Hangar.Con]::GetConsoleTitleW($sb, 1024)
+[void][Hangar.Con]::FreeConsole()
+$title = $sb.ToString()
+if (-not $title) { exit 3 }
+$bare = { param($s) ($s -replace '^\W\s+', '').Trim() }
+$win = [Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$env:HANGAR_FOCUS_WINDOW)
+$isTab = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::TabItem)
+$tabs = @($win.FindAll([Windows.Automation.TreeScope]::Descendants, $isTab))
+$tab = $tabs | Where-Object { $_.Current.Name -eq $title } | Select-Object -First 1
+if (-not $tab) { $t = & $bare $title; $tab = $tabs | Where-Object { (& $bare $_.Current.Name) -eq $t } | Select-Object -First 1 }
+if (-not $tab) { exit 4 }
+$tab.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
+"#;
+
+fn select_tab(pid: u32, window: isize) {
+    let script: Vec<u8> = SELECT_TAB.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut c = command("powershell.exe");
+    c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &base64(&script)])
+        .env("HANGAR_FOCUS_PID", pid.to_string())
+        .env("HANGAR_FOCUS_WINDOW", window.to_string());
+    let r = run_with(&mut c, None, Duration::from_secs(15));
+    if !r.ok {
+        eprintln!("hangar: no tab selected for pid {pid}: {}", r.err.trim());
+    }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            s.push(if i <= c.len() { A[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    s
+}
+
 // The few Win32/NT calls needed, declared directly.
 mod win {
     use std::ffi::c_void;
+
+    type Hwnd = *mut c_void;
+
+    pub struct ConsoleWindow {
+        pub hwnd: isize,
+        pub pid: u32,
+        /// A ConPTY pseudo-window (owned by the terminal), rather than a classic console window.
+        pub pseudo: bool,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(f: extern "system" fn(Hwnd, isize) -> i32, l: isize) -> i32;
+        fn GetClassNameW(h: Hwnd, s: *mut u16, n: i32) -> i32;
+        fn GetWindowThreadProcessId(h: Hwnd, pid: *mut u32) -> u32;
+        fn GetAncestor(h: Hwnd, flags: u32) -> Hwnd;
+        fn IsWindowVisible(h: Hwnd) -> i32;
+        fn IsIconic(h: Hwnd) -> i32;
+        fn ShowWindow(h: Hwnd, cmd: i32) -> i32;
+        fn SetForegroundWindow(h: Hwnd) -> i32;
+    }
+
+    pub fn console_windows() -> Vec<ConsoleWindow> {
+        extern "system" fn each(h: Hwnd, out: isize) -> i32 {
+            let out = unsafe { &mut *(out as *mut Vec<ConsoleWindow>) };
+            let mut buf = [0u16; 64];
+            let n = unsafe { GetClassNameW(h, buf.as_mut_ptr(), buf.len() as i32) }.max(0) as usize;
+            let class = String::from_utf16_lossy(&buf[..n]);
+            let pseudo = class == "PseudoConsoleWindow";
+            if pseudo || class == "ConsoleWindowClass" {
+                let mut pid = 0;
+                unsafe { GetWindowThreadProcessId(h, &mut pid) };
+                out.push(ConsoleWindow { hwnd: h as isize, pid, pseudo });
+            }
+            1
+        }
+        let mut v: Vec<ConsoleWindow> = Vec::new();
+        unsafe { EnumWindows(each, &mut v as *mut _ as isize) };
+        v
+    }
+
+    /// The window that shows a console: the terminal owning a pseudo-window, or a visible classic console window.
+    pub fn terminal_of(w: &ConsoleWindow) -> Option<isize> {
+        const GA_ROOTOWNER: u32 = 3;
+        let h = w.hwnd as Hwnd;
+        let target = if w.pseudo { unsafe { GetAncestor(h, GA_ROOTOWNER) } } else { h };
+        (!target.is_null() && (target != h || !w.pseudo) && unsafe { IsWindowVisible(target) } != 0).then_some(target as isize)
+    }
+
+    pub fn bring_forward(window: isize) {
+        const SW_RESTORE: i32 = 9;
+        let h = window as Hwnd;
+        unsafe {
+            if IsIconic(h) != 0 {
+                ShowWindow(h, SW_RESTORE);
+            }
+            SetForegroundWindow(h);
+        }
+    }
+
+    /// The process hosting the console `pid` is attached to (conhost / OpenConsole); None without a console.
+    pub fn console_host(pid: u32) -> Option<u32> {
+        const PROCESS_CONSOLE_HOST_PROCESS: u32 = 49;
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let mut v: usize = 0;
+            let ok = NtQueryInformationProcess(h, PROCESS_CONSOLE_HOST_PROCESS, (&mut v as *mut usize).cast(), std::mem::size_of::<usize>() as u32, std::ptr::null_mut()) == 0;
+            CloseHandle(h);
+            // The low bits are flags.
+            Some((v & !3) as u32).filter(|&p| ok && p != 0)
+        }
+    }
 
     #[repr(C)]
     #[derive(Default)]
@@ -132,6 +285,7 @@ mod win {
     #[link(name = "ntdll")]
     extern "system" {
         fn NtQuerySystemInformation(class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
+        fn NtQueryInformationProcess(h: *mut c_void, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
     }
 
     pub fn private_bytes(pid: u32) -> Option<usize> {
