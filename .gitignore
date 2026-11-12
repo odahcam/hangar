@@ -5,3 +5,4 @@ app/gen/
 test-results/
 playwright-report/
 .ci-logs/
+.wrangler/

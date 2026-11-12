@@ -1,0 +1,22 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "hangar-relay",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-01",
+	"account_id": "986fa99c80ca3636b341894942fb9bfe",
+	"workers_dev": false,
+	"routes": [{ "pattern": "hangar.odahcam.com", "custom_domain": true }],
+	// Logs keep request metadata only: the token travels in the Authorization header, never in the URL.
+	"observability": { "enabled": true },
+	"vars": {
+		"ISSUER": "https://auth.odahcam.com",
+		"AUDIENCE": "https://hangar.odahcam.com",
+		"CLIENT_ID": "hangar",
+		"JWKS": "https://auth.odahcam.com/api/auth/jwks",
+		// Empty serves no one: the account ids go here at deploy (see auth.ts).
+		"ALLOWED_SUBS": ""
+	},
+	"durable_objects": { "bindings": [{ "name": "ACCOUNT", "class_name": "Account" }] },
+	// SQLite-backed: the only Durable Objects the Workers Free plan runs.
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Account"] }]
+}
