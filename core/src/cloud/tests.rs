@@ -30,7 +30,7 @@ fn shared_chain_cases() {
 }
 
 fn identity() -> Identity {
-    Identity::from_secrets(&Secrets { ed25519: b64(&rand32()), x25519: b64(&rand32()), refresh: String::new(), pin: String::new() }).unwrap()
+    Identity::from_secrets(&Secrets { ed25519: b64(&rand32()), x25519: b64(&rand32()), refresh: String::new(), pin: String::new(), refresh_sent_at: 0 }).unwrap()
 }
 
 fn rand32() -> [u8; 32] {
@@ -65,17 +65,18 @@ fn the_pin_refuses_rollback_rewritten_history_and_a_new_epoch() {
     let add_b = entry(&a, body(1, &chain::digest(&root.body), "add", &b, &a));
     let remove_b = entry(&a, body(2, &chain::digest(&add_b.body), "remove", &b, &a));
     let full = vec![root.clone(), add_b.clone(), remove_b.clone()];
-    let pin = pin_of(0, &verify(&full).unwrap()).unwrap();
+    let pin = pin_of("user-1", 0, &verify(&full).unwrap()).unwrap();
 
     // Extending is fine; dropping the remove would bring b back.
     let add_c = entry(&a, body(3, &chain::digest(&remove_b.body), "add", &c, &a));
-    assert!(check_pin(&pin, 0, &[full.clone(), vec![add_c]].concat()).is_ok());
-    assert_eq!(check_pin(&pin, 0, &full[..2]).unwrap_err(), "rollback");
-    assert_eq!(check_pin(&pin, 1, &full).unwrap_err(), "epoch");
+    assert!(check_pin(&pin, "user-1", 0, &[full.clone(), vec![add_c]].concat()).is_ok());
+    assert_eq!(check_pin(&pin, "user-1", 0, &full[..2]).unwrap_err(), "rollback");
+    assert_eq!(check_pin(&pin, "user-1", 1, &full).unwrap_err(), "epoch");
+    assert_eq!(check_pin(&pin, "user-2", 0, &full).unwrap_err(), "account");
 
     // Same length, different history: another root.
     let root2 = entry(&c, body(0, "", "root", &c, &c));
     let add_a = entry(&c, body(1, &chain::digest(&root2.body), "add", &a, &c));
     let add_b2 = entry(&c, body(2, &chain::digest(&add_a.body), "add", &b, &c));
-    assert_eq!(check_pin(&pin, 0, &[root2, add_a, add_b2]).unwrap_err(), "history");
+    assert_eq!(check_pin(&pin, "user-1", 0, &[root2, add_a, add_b2]).unwrap_err(), "history");
 }

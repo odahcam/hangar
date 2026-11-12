@@ -7,8 +7,8 @@ use crate::{iso, now_ms, ApiError, ApiResult, Hangar, Reply};
 use serde_json::{json, Value};
 
 const SWITCH: &str = "remote_control";
-/// Changes and refusals kept in the log. Reads don't go in it (the remote UI lists sessions all the time and would
-/// push out a resume within minutes); they are counted per device instead.
+/// Accepted changes kept in the log. Reads don't go in it (the remote UI lists sessions all the time and would push
+/// out a resume within minutes) and neither do refusals: both are counted instead.
 const LOG_KEEP: i64 = 500;
 const PATH_MAX: usize = 120;
 
@@ -63,6 +63,16 @@ impl Hangar {
             return Ok(());
         }
         let path: String = path.chars().take(PATH_MAX).collect();
+        // Refusals are counted per device, method, path and status: a flood of them can't push accepted changes out.
+        if status >= 400 {
+            db.execute(
+                "insert into remote_denied (device, method, path, status, last_at, n) values (?, ?, ?, ?, ?, 1)
+                 on conflict (device, method, path, status) do update set last_at = excluded.last_at, n = n + 1",
+                rusqlite::params![device, method, path, status, at],
+            )?;
+            db.execute("delete from remote_denied where rowid not in (select rowid from remote_denied order by last_at desc limit ?)", [LOG_KEEP])?;
+            return Ok(());
+        }
         db.execute("insert into remote_log (at, device, method, path, status) values (?, ?, ?, ?, ?)", rusqlite::params![at, device, method, path, status])?;
         db.execute("delete from remote_log where rowid <= (select max(rowid) from remote_log) - ?", [LOG_KEEP])?;
         Ok(())
@@ -78,7 +88,11 @@ impl Hangar {
             .collect::<Result<_, _>>()?;
         let mut q = db.prepare("select device, last_at, n from remote_reads order by last_at desc")?;
         let reads: Vec<Value> = q.query_map([], |r| Ok(json!({ "device": r.get::<_, String>(0)?, "at": r.get::<_, String>(1)?, "count": r.get::<_, i64>(2)? })))?.collect::<Result<_, _>>()?;
-        Ok(json!({ "enabled": db::get_meta(&db, SWITCH)?.as_deref() == Some("on"), "log": log, "reads": reads }))
+        let mut q = db.prepare("select device, method, path, status, last_at, n from remote_denied order by last_at desc limit 50")?;
+        let denied: Vec<Value> = q
+            .query_map([], |r| Ok(json!({ "device": r.get::<_, String>(0)?, "method": r.get::<_, String>(1)?, "path": r.get::<_, String>(2)?, "status": r.get::<_, u16>(3)?, "at": r.get::<_, String>(4)?, "count": r.get::<_, i64>(5)? })))?
+            .collect::<Result<_, _>>()?;
+        Ok(json!({ "enabled": db::get_meta(&db, SWITCH)?.as_deref() == Some("on"), "log": log, "reads": reads, "denied": denied }))
     }
 
     /// PATCH /api/remote {enabled}: local only, never reachable through handle_remote.

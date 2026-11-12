@@ -26,6 +26,11 @@ pub struct Secrets {
     /// not in state.db, so a local process that can write Hangar's data folder can't rewrite what is trusted.
     #[serde(default)]
     pub pin: String,
+    /// When a refresh request was sent whose answer hasn't been stored yet (ms since the epoch), 0 when none. If the
+    /// answer never arrived, the server may have rotated the token already: past its reuse grace the old one must not
+    /// be sent again, since a retired token's reuse revokes every machine of the account.
+    #[serde(default)]
+    pub refresh_sent_at: i64,
 }
 
 fn test_dir() -> Option<PathBuf> {
@@ -53,9 +58,24 @@ pub fn load() -> Result<Option<Secrets>, String> {
     parsed.map(Some)
 }
 
+/// Every read-modify-write of the item goes through `update`, under this lock: the refresh token and the pin share
+/// the item, and two writers each starting from their own read would put back the other's old value.
+static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Reads the item, lets `f` change it and stores it, all under the process-wide lock. `f` gets None when there is no
+/// item yet; it returns the item to store (None leaves the store as it was) and a value for the caller.
+pub fn update<T>(f: impl FnOnce(Option<Secrets>) -> Result<(Option<Secrets>, T), String>) -> Result<T, String> {
+    let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (next, out) = f(load()?)?;
+    if let Some(s) = next {
+        store(&s)?;
+    }
+    Ok(out)
+}
+
 /// Replaces the item as a whole: a rotated refresh token is stored before it is used, so a crash can't leave the
-/// store holding a token the server has already retired.
-pub fn store(s: &Secrets) -> Result<(), String> {
+/// store holding a token the server has already retired. Only `update` calls it.
+fn store(s: &Secrets) -> Result<(), String> {
     let mut text = serde_json::to_string(s).map_err(|e| e.to_string())?;
     let r = match test_dir() {
         Some(dir) => {

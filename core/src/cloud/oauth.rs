@@ -83,6 +83,29 @@ pub struct Auth {
     access: Mutex<Option<Access>>,
     /// Held for the whole refresh, so two callers never spend the same refresh token.
     refreshing: Mutex<()>,
+    /// A rotated refresh token the credential store refused to take; used and stored from here until it does.
+    unsaved: Mutex<Option<Zeroizing<String>>>,
+}
+
+/// How long the identity service still takes a rotated refresh token (30 s), minus a margin.
+const REUSE_GRACE_MS: i64 = 25_000;
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// A failed token request: the service answered (nothing rotated), or no answer came (it may have).
+enum Answer {
+    Answered(AuthError),
+    Lost(AuthError),
+}
+
+impl From<Answer> for AuthError {
+    fn from(a: Answer) -> AuthError {
+        match a {
+            Answer::Answered(e) | Answer::Lost(e) => e,
+        }
+    }
 }
 
 fn random_b64() -> Zeroizing<String> {
@@ -133,7 +156,7 @@ impl Auth {
         let test_issuer = if cfg!(debug_assertions) { std::env::var("HANGAR_AUTH_ISSUER").ok().filter(|i| i.starts_with("http://127.0.0.1:")) } else { None };
         let issuer = test_issuer.unwrap_or_else(|| ISSUER.into());
         let agent = ureq::Agent::config_builder().http_status_as_error(false).https_only(issuer.starts_with("https://")).timeout_global(Some(Duration::from_secs(20))).build().into();
-        Auth { issuer, agent, pending: Mutex::default(), access: Mutex::default(), refreshing: Mutex::default() }
+        Auth { issuer, agent, pending: Mutex::default(), access: Mutex::default(), refreshing: Mutex::default(), unsaved: Mutex::default() }
     }
 
     /// Starts a sign-in and returns the URL to open in the browser. `fresh` asks for an interactive login even with a
@@ -185,7 +208,7 @@ impl Auth {
         let code = params.get("code").ok_or_else(|| bad("code"))?.clone();
         let verifier = pending.take().expect("checked above").verifier;
         drop(pending);
-        let reply = self.token(&[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", REDIRECT_URI), ("code_verifier", &verifier)])?;
+        let reply = self.token(&[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", REDIRECT_URI), ("code_verifier", &verifier)]).map_err(AuthError::from)?;
         let access = self.accept(reply.access_token, reply.refresh_token)?;
         Ok(SignedIn { access, id_token: reply.id_token })
     }
@@ -201,29 +224,66 @@ impl Auth {
         if let Some(a) = fresh(&self.access.lock().unwrap_or_else(|e| e.into_inner())) {
             return Ok(a);
         }
-        let stored = secrets::load().map_err(AuthError::Unavailable)?.ok_or(AuthError::SignedOut)?;
-        if stored.refresh.is_empty() {
-            return Err(AuthError::SignedOut);
-        }
-        let reply = match self.token(&[("grant_type", "refresh_token"), ("refresh_token", &stored.refresh)]) {
-            // The service says the token is no good: it's gone for this machine too.
-            Err(AuthError::Invalid(e)) if e == "invalid_grant" => {
-                self.forget()?;
-                return Err(AuthError::SignedOut);
+        // Bound first: a guard in the match scrutinee would live through forget(), which takes the same lock.
+        let unsaved = self.unsaved.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let refresh = match unsaved {
+            // A rotated token we couldn't store yet: it is the live one, the stored one is retired.
+            Some(r) => r,
+            None => {
+                let stored = secrets::load().map_err(AuthError::Unavailable)?.ok_or(AuthError::SignedOut)?;
+                if stored.refresh.is_empty() {
+                    return Err(AuthError::SignedOut);
+                }
+                // A refresh went out and its answer never came back: the server may have rotated the token. Past the
+                // reuse grace, sending the old one again would revoke every machine of the account, so only this one
+                // signs out.
+                if stored.refresh_sent_at != 0 && now_ms() - stored.refresh_sent_at > REUSE_GRACE_MS {
+                    self.forget()?;
+                    return Err(AuthError::SignedOut);
+                }
+                Zeroizing::new(stored.refresh.clone())
             }
-            r => r?,
         };
-        self.accept(reply.access_token, reply.refresh_token)
+        secrets::update(|s| {
+            let mut s = s.ok_or("no device identity")?;
+            if s.refresh_sent_at == 0 {
+                s.refresh_sent_at = now_ms();
+            }
+            Ok((Some(s), ()))
+        })
+        .map_err(AuthError::Unavailable)?;
+        match self.token(&[("grant_type", "refresh_token"), ("refresh_token", &refresh)]) {
+            Ok(reply) => self.accept(reply.access_token, reply.refresh_token),
+            // The service answered, so nothing rotated (or, for invalid_grant, the token is dead for this machine).
+            Err(Answer::Answered(e)) => {
+                if e == AuthError::Invalid("invalid_grant".into()) {
+                    self.forget()?;
+                    return Err(AuthError::SignedOut);
+                }
+                let _ = secrets::update(|s| Ok((s.map(|mut s| (s.refresh_sent_at = 0, s).1), ())));
+                Err(e)
+            }
+            // No answer: the request may or may not have reached the server; the mark stays for the next attempt.
+            Err(Answer::Lost(e)) => Err(e),
+        }
     }
 
-    /// Stores the rotated refresh token, then caches and returns the access token.
+    /// Stores the rotated refresh token, then caches and returns the access token. If the store fails the new token
+    /// stays in memory and is stored (and used) from there: falling back to the retired one would revoke everything.
     fn accept(&self, token: String, refresh: Option<String>) -> Result<Access, AuthError> {
         let c = claims(&token).ok_or_else(|| AuthError::Invalid("access_token".into()))?;
         let (Some(sub), Some(exp)) = (c["sub"].as_str(), c["exp"].as_i64()) else { return Err(AuthError::Invalid("access_token".into())) };
-        let refresh = refresh.ok_or_else(|| AuthError::Invalid("refresh_token".into()))?;
-        let mut s = secrets::load().map_err(AuthError::Unavailable)?.ok_or_else(|| AuthError::Invalid("no device identity".into()))?;
-        s.refresh = refresh;
-        secrets::store(&s).map_err(AuthError::Unavailable)?;
+        let refresh = Zeroizing::new(refresh.ok_or_else(|| AuthError::Invalid("refresh_token".into()))?);
+        let stored = secrets::update(|s| {
+            let mut s = s.ok_or("no device identity")?;
+            s.refresh = refresh.to_string();
+            s.refresh_sent_at = 0;
+            Ok((Some(s), ()))
+        });
+        *self.unsaved.lock().unwrap_or_else(|e| e.into_inner()) = stored.is_err().then(|| refresh.clone());
+        if let Err(e) = stored {
+            eprintln!("cloud: refresh token kept in memory, store failed: {e}");
+        }
         let a = Access { token, sub: sub.into(), exp };
         *self.access.lock().unwrap_or_else(|e| e.into_inner()) = Some(a.clone());
         Ok(a)
@@ -232,35 +292,46 @@ impl Auth {
     /// Signs this machine out: the refresh token is dropped here and revoked at the service when it can be reached.
     pub fn sign_out(&self) -> Result<(), AuthError> {
         let _flight = self.refreshing.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = secrets::load().map_err(AuthError::Unavailable)?.filter(|s| !s.refresh.is_empty()) {
+        let unsaved = self.unsaved.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let stored = secrets::load().map_err(AuthError::Unavailable)?.map(|s| Zeroizing::new(s.refresh.clone()));
+        if let Some(token) = unsaved.or(stored).filter(|t| !t.is_empty()) {
             let url = format!("{}/api/auth/oauth2/revoke", self.issuer);
-            let _ = self.agent.post(&url).send_form([("token", s.refresh.as_str()), ("token_type_hint", "refresh_token"), ("client_id", CLIENT_ID)]);
+            let _ = self.agent.post(&url).send_form([("token", token.as_str()), ("token_type_hint", "refresh_token"), ("client_id", CLIENT_ID)]);
         }
         self.forget()
     }
 
     fn forget(&self) -> Result<(), AuthError> {
         *self.access.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        if let Some(mut s) = secrets::load().map_err(AuthError::Unavailable)? {
-            s.refresh.clear();
-            secrets::store(&s).map_err(AuthError::Unavailable)?;
-        }
-        Ok(())
+        *self.unsaved.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        secrets::update(|s| {
+            Ok((
+                s.map(|mut s| {
+                    s.refresh.clear();
+                    s.refresh_sent_at = 0;
+                    s
+                }),
+                (),
+            ))
+        })
+        .map_err(AuthError::Unavailable)
     }
 
-    fn token(&self, grant: &[(&str, &str)]) -> Result<TokenReply, AuthError> {
+    fn token(&self, grant: &[(&str, &str)]) -> Result<TokenReply, Answer> {
         let url = format!("{}/api/auth/oauth2/token", self.issuer);
         let mut form: Vec<(&str, &str)> = grant.to_vec();
         form.extend([("client_id", CLIENT_ID), ("resource", RESOURCE)]);
-        let mut res = self.agent.post(&url).send_form(form).map_err(|e| AuthError::Unavailable(e.to_string()))?;
+        let lost = |e: String| Answer::Lost(AuthError::Unavailable(e));
+        let mut res = self.agent.post(&url).send_form(form).map_err(|e| lost(e.to_string()))?;
         let status = res.status().as_u16();
-        let body = res.body_mut().read_to_string().map_err(|e| AuthError::Unavailable(e.to_string()))?;
+        let body = res.body_mut().read_to_string().map_err(|e| lost(e.to_string()))?;
         match status {
-            200 => serde_json::from_str(&body).map_err(|_| AuthError::Invalid("token reply".into())),
-            429 | 500..=599 => Err(AuthError::Unavailable(format!("HTTP {status}"))),
+            // A 200 we can't read is as good as lost: the server rotated, and we don't have the new token.
+            200 => serde_json::from_str(&body).map_err(|_| Answer::Lost(AuthError::Invalid("token reply".into()))),
+            429 | 500..=599 => Err(Answer::Answered(AuthError::Unavailable(format!("HTTP {status}")))),
             _ => {
                 let code = serde_json::from_str::<Value>(&body).ok().and_then(|v| v["error"].as_str().map(String::from));
-                Err(AuthError::Invalid(code.unwrap_or_else(|| format!("HTTP {status}"))))
+                Err(Answer::Answered(AuthError::Invalid(code.unwrap_or_else(|| format!("HTTP {status}")))))
             }
         }
     }

@@ -129,6 +129,8 @@ pub fn verify(entries: &[Entry]) -> Result<State, &'static str> {
 /// What a Hangar pinned of the chain the last time it accepted it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Pin {
+    /// The account the chain belongs to: signing in with another one is a change of account, not tampering.
+    pub sub: String,
     pub epoch: u64,
     pub root: String,
     pub len: usize,
@@ -138,7 +140,10 @@ pub struct Pin {
 /// Accepts the relay's chain only if it extends the pinned one: same epoch, same root, no shorter, and the entry at
 /// the pinned length still hashes to the pinned digest. Anything else (a reset, a rewritten history, a rollback that
 /// would resurrect a removed device) is refused until the person pairs this machine again.
-pub fn check_pin(pin: &Pin, epoch: u64, entries: &[Entry]) -> Result<State, &'static str> {
+pub fn check_pin(pin: &Pin, sub: &str, epoch: u64, entries: &[Entry]) -> Result<State, &'static str> {
+    if sub != pin.sub {
+        return Err("account");
+    }
     if epoch != pin.epoch {
         return Err("epoch");
     }
@@ -152,6 +157,6 @@ pub fn check_pin(pin: &Pin, epoch: u64, entries: &[Entry]) -> Result<State, &'st
     entries[pin.len..].iter().try_fold(prefix, |s, e| append(&s, e))
 }
 
-pub fn pin_of(epoch: u64, state: &State) -> Option<Pin> {
-    Some(Pin { epoch, root: state.root.clone()?, len: state.len, digest: state.digest.clone() })
+pub fn pin_of(sub: &str, epoch: u64, state: &State) -> Option<Pin> {
+    Some(Pin { sub: sub.into(), epoch, root: state.root.clone()?, len: state.len, digest: state.digest.clone() })
 }

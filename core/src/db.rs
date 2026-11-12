@@ -18,7 +18,9 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
         create table if not exists account (
           dir text primary key, name text, color text, added integer not null default 0, hidden integer not null default 0);
         create table if not exists remote_log (at text not null, device text not null, method text not null, path text not null, status integer not null);
-        create table if not exists remote_reads (device text primary key, last_at text not null, n integer not null);",
+        create table if not exists remote_reads (device text primary key, last_at text not null, n integer not null);
+        create table if not exists remote_denied (device text not null, method text not null, path text not null, status integer not null,
+          last_at text not null, n integer not null, primary key (device, method, path, status));",
     )?;
     if get_meta(&db, "schema")?.as_deref() != Some(SCHEMA) {
         db.execute_batch("drop table if exists transcript; drop table if exists activity; drop table if exists msg;")?;

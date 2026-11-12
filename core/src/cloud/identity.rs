@@ -17,15 +17,17 @@ pub struct Identity {
 impl Identity {
     /// The stored identity, or a new one stored before it is returned.
     pub fn load_or_create() -> Result<Identity, String> {
-        if let Some(s) = secrets::load()? {
-            return Identity::from_secrets(&s);
-        }
-        let mut seed = Zeroizing::new([0u8; 32]);
-        let mut dh = Zeroizing::new([0u8; 32]);
-        getrandom::fill(seed.as_mut()).and_then(|_| getrandom::fill(dh.as_mut())).map_err(|e| e.to_string())?;
-        let s = Secrets { ed25519: b64(seed.as_ref()), x25519: b64(dh.as_ref()), refresh: String::new(), pin: String::new() };
-        secrets::store(&s)?;
-        Identity::from_secrets(&s)
+        secrets::update(|current| {
+            if let Some(s) = current {
+                return Ok((None, Identity::from_secrets(&s)?));
+            }
+            let mut seed = Zeroizing::new([0u8; 32]);
+            let mut dh = Zeroizing::new([0u8; 32]);
+            getrandom::fill(seed.as_mut()).and_then(|_| getrandom::fill(dh.as_mut())).map_err(|e| e.to_string())?;
+            let s = Secrets { ed25519: b64(seed.as_ref()), x25519: b64(dh.as_ref()), refresh: String::new(), pin: String::new(), refresh_sent_at: 0 };
+            let id = Identity::from_secrets(&s)?;
+            Ok((Some(s), id))
+        })
     }
 
     pub fn from_secrets(s: &Secrets) -> Result<Identity, String> {

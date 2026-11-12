@@ -37,6 +37,8 @@ fn issuer() -> Issuer {
             std::thread::sleep(std::time::Duration::from_millis(100));
             n += 1;
             let next = { let mut q = s.lock().unwrap(); (!q.is_empty()).then(|| q.remove(0)) };
+            // Status 0: a 200 whose body can't be read, as if the answer were lost after the server rotated.
+            let next = next.map(|(s, b)| if s == 0 { (200, "not json".to_string()) } else { (s, b) });
             let (status, body) = next.unwrap_or_else(|| (200, format!(r#"{{"access_token":"{}","refresh_token":"refresh-{n}","id_token":"id-{n}"}}"#, jwt("user-1", chrono::Utc::now().timestamp() + 3600))));
             let _ = req.respond(tiny_http::Response::from_string(body).with_status_code(status));
         }
@@ -134,5 +136,25 @@ fn sign_in_and_refresh() {
     assert_eq!(secrets::load().unwrap().unwrap().refresh, "");
     // The device identity survives signing out.
     assert!(!secrets::load().unwrap().unwrap().ed25519.is_empty());
+
+    // A refresh whose answer is lost: retried with the same token inside the reuse grace, never after it.
+    let set_refresh = |r: &str, sent_at: i64| secrets::update(|s| { let mut s = s.unwrap(); s.refresh = r.into(); s.refresh_sent_at = sent_at; Ok((Some(s), ())) }).unwrap();
+    set_refresh("refresh-x", 0);
+    let auth = Auth::new();
+    iss.script.lock().unwrap().push((0, String::new()));
+    assert!(auth.access().is_err());
+    let s = secrets::load().unwrap().unwrap();
+    assert_eq!(s.refresh, "refresh-x");
+    assert_ne!(s.refresh_sent_at, 0, "the request is marked as sent");
+    let before = iss.requests.lock().unwrap().len();
+    assert!(auth.access().is_ok(), "retried inside the grace");
+    assert_eq!(iss.requests.lock().unwrap()[before]["refresh_token"], "refresh-x");
+    assert_eq!(secrets::load().unwrap().unwrap().refresh_sent_at, 0);
+    set_refresh("refresh-y", chrono::Utc::now().timestamp_millis() - 30_000);
+    let auth = Auth::new();
+    let before = iss.requests.lock().unwrap().len();
+    assert_eq!(auth.access().unwrap_err(), AuthError::SignedOut);
+    assert_eq!(iss.requests.lock().unwrap().len(), before, "the possibly retired token is not sent");
+    assert_eq!(secrets::load().unwrap().unwrap().refresh, "");
     let _ = std::fs::remove_dir_all(&dir);
 }
