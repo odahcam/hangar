@@ -62,9 +62,14 @@ fn main() {
                         Err(e) => json(500, serde_json::json!({ "error": e.to_string() })),
                     }
                 } else {
+                    // Tests stand in for a paired device with this header; without the env var it means nothing.
+                    let remote = std::env::var_os("HANGAR_TEST_REMOTE").and(header("x-hangar-remote-device"));
                     let mut body = String::new();
                     let _ = req.as_reader().take(1_000_000).read_to_string(&mut body);
-                    let r = hangar.handle(&method, &path, &body);
+                    let r = match remote {
+                        Some(device) => hangar.handle_remote(&device, &method, &path, &body),
+                        None => hangar.handle(&method, &path, &body),
+                    };
                     json(r.status, r.body)
                 }
             };

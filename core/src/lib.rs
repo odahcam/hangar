@@ -10,6 +10,7 @@ mod db;
 mod insights;
 pub mod platform;
 mod proc;
+mod remote;
 mod scan;
 mod sessions;
 
@@ -288,6 +289,8 @@ impl Hangar {
             ("POST", "accounts") => return self.add_account(&parse()?),
             ("PATCH", "account") => return self.update_account(&parse()?),
             ("DELETE", "account") => return self.remove_account(&parse()?),
+            ("GET", "remote") => return self.remote_status(),
+            ("PATCH", "remote") => return self.set_remote(&parse()?),
             ("POST", "order") => {
                 self.set_order(&parse()?["ids"])?;
                 return Ok(json!({ "ok": true }));
