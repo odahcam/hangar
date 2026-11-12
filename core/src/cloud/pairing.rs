@@ -33,6 +33,8 @@ pub const CODE_LEN: usize = 6;
 const CODE_TTL: Duration = Duration::from_secs(300);
 /// Wrong tries a code survives; with 30 bits, guessing it online is out of reach.
 const MAX_TRIES: u32 = 3;
+/// A try's proof follows its SPAKE2 answer within this, or the try is dropped.
+const PROOF_WITHIN: Duration = Duration::from_secs(15);
 const AD: &[u8] = b"hangar-pair-v1";
 
 pub fn is_frame(f: &[u8]) -> bool {
@@ -82,8 +84,8 @@ pub struct Offer {
     code: Zeroizing<String>,
     shown: Instant,
     tries: u32,
-    /// Pairings in flight, by (new device, id): the key once SPAKE2 is done.
-    keys: HashMap<(String, [u8; 8]), Zeroizing<Vec<u8>>>,
+    /// Pairings in flight, by (new device, id): the key once SPAKE2 is done, and since when.
+    keys: HashMap<(String, [u8; 8]), (Zeroizing<Vec<u8>>, Instant)>,
     /// The device being added and its Noise key, once its proof checked out.
     pub accepted: Option<(String, String, [u8; 8])>,
 }
@@ -117,22 +119,28 @@ impl Offer {
         }
         match kind {
             START => {
+                // A try that didn't send its proof in time is dropped, and each device has one try in flight: a
+                // guest can't fill the slots and keep the right machine out until the code expires.
+                self.keys.retain(|(d, _), (_, at)| at.elapsed() < PROOF_WITHIN && d != from);
                 if self.keys.len() >= 4 {
                     return refuse();
                 }
                 let (a, b) = ids(me, from);
                 let (state, msg) = Spake2::<Ed25519Group>::start_a(&Password::new(self.code.as_bytes()), &a, &b);
                 let Ok(key) = state.finish(body) else { return refuse() };
-                self.keys.insert((from.to_string(), id), Zeroizing::new(key));
+                self.keys.insert((from.to_string(), id), (Zeroizing::new(key), Instant::now()));
                 MemberStep::Send(from.to_string(), frame(ANSWER, &id, &msg))
             }
             PROOF => {
-                let Some(key) = self.keys.remove(&(from.to_string(), id)) else { return refuse() };
+                let Some((key, at)) = self.keys.remove(&(from.to_string(), id)) else { return refuse() };
+                if at.elapsed() >= PROOF_WITHIN {
+                    return refuse();
+                }
                 let opened = aead(&key).decrypt(&nonce(0), Payload { msg: body, aad: AD });
                 let dh = opened.ok().and_then(|p| serde_json::from_slice::<Value>(&p).ok()).and_then(|v| v["dh"].as_str().map(String::from));
                 match dh.filter(|d| super::chain::is_key(d)) {
                     Some(dh) => {
-                        self.keys.insert((from.to_string(), id), key);
+                        self.keys.insert((from.to_string(), id), (key, Instant::now()));
                         self.accepted = Some((from.to_string(), dh.clone(), id));
                         MemberStep::Add { device: from.to_string(), dh }
                     }
@@ -150,7 +158,7 @@ impl Offer {
     /// After the add is in the chain: the pin for the new device, sealed with the pairing key.
     pub fn pin(&mut self, pin: &Pin) -> Option<(String, Vec<u8>)> {
         let (device, _, id) = self.accepted.clone()?;
-        let key = self.keys.remove(&(device.clone(), id))?;
+        let (key, _) = self.keys.remove(&(device.clone(), id))?;
         let sealed = aead(&key).encrypt(&nonce(1), Payload { msg: json!({ "pin": pin }).to_string().as_bytes(), aad: AD }).ok()?;
         Some((device, frame(PIN, &id, &sealed)))
     }

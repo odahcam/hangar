@@ -77,6 +77,10 @@ pub struct Cloud {
     busy: Mutex<HashMap<String, usize>>,
     offer: Mutex<Option<Offer>>,
     join: Mutex<Option<Join>>,
+    /// The pending sign-in is a recovery one (begin_recovery).
+    recovery: Mutex<bool>,
+    /// A chain.reset was sent and the relay hasn't answered it yet.
+    asked: Mutex<bool>,
     stop: Arc<AtomicBool>,
 }
 
@@ -127,6 +131,8 @@ impl Cloud {
             busy: Mutex::default(),
             offer: Mutex::default(),
             join: Mutex::default(),
+            recovery: Mutex::default(),
+            asked: Mutex::default(),
             stop: Arc::new(AtomicBool::new(false)),
         });
         let (auth, handler, stop) = (Arc::clone(&cloud.auth), Arc::clone(&cloud) as Arc<dyn Handler>, Arc::clone(&cloud.stop));
@@ -230,17 +236,48 @@ impl Cloud {
                 v.state = State::default();
                 // The account's first machine roots the chain with itself.
                 if entries.is_empty() && epoch == 0 {
-                    let body = Body { v: 1, seq: 0, prev: String::new(), op: "root".into(), device: self.identity.device(), dh: Some(self.identity.dh()), signer: self.identity.device() };
-                    let text = body.canonical();
-                    let entry = Entry { sig: self.identity.sign(text.as_bytes()), body: text };
-                    v.rooting = Some(entry.clone());
-                    let _ = self.out.send(Cmd::Text(json!({ "t": "chain.append", "entry": entry })));
+                    self.send_root(&mut v);
                 }
             }
         }
+        self.root_if_recovering(&mut v);
         let members = if v.trust == Trust::Member { v.state.members.clone() } else { chain::Members::new() };
         drop(v);
         lock(&self.peers).retain(&members);
+    }
+
+    fn send_root(&self, v: &mut View) {
+        let body = Body { v: 1, seq: 0, prev: String::new(), op: "root".into(), device: self.identity.device(), dh: Some(self.identity.dh()), signer: self.identity.device() };
+        let text = body.canonical();
+        let entry = Entry { sig: self.identity.sign(text.as_bytes()), body: text };
+        v.rooting = Some(entry.clone());
+        let _ = self.out.send(Cmd::Text(json!({ "t": "chain.append", "entry": entry })));
+    }
+
+    /// After a recovery reset this machine asked for (on this machine, with a fresh sign-in), the relay's chain is
+    /// empty in a new epoch: the old pin goes and this machine roots the new chain. The relay lets only the device
+    /// that asked do it.
+    fn root_if_recovering(&self, v: &mut View) {
+        let recovering = secrets::load().ok().flatten().is_some_and(|s| s.recovering);
+        if recovering && v.seen.is_empty() && v.seen_epoch > 0 && v.rooting.is_none() {
+            let _ = secrets::update(|s| Ok((s.map(|mut s| (s.pin.clear(), s).1), ())));
+            self.send_root(v);
+        }
+    }
+
+    /// POST /api/cloud/recover: a fresh sign-in (prompt=login) bound to this socket's challenge, for asking the relay
+    /// to reset a chain whose machines are all lost. Returns the URL to open; the callback finishes it.
+    pub fn begin_recovery(&self) -> Result<String, String> {
+        let v = lock(&self.view);
+        if v.trust == Trust::Member {
+            return Err("member".into());
+        }
+        if v.nonce.is_empty() {
+            return Err("offline".into());
+        }
+        let url = self.auth.begin(Some(&v.nonce));
+        *lock(&self.recovery) = true;
+        Ok(url)
     }
 
     /// New entries, live. They count only as an extension of the verified chain of a member, or as this machine's
@@ -264,10 +301,14 @@ impl Cloud {
             }
             self.settle(&mut v, &sub, epoch, state);
         } else if let Some(root) = v.rooting.clone() {
-            if stored_pin().is_none() && epoch == 0 && new.first() == Some(&root) {
+            // Our own root confirmed, in the epoch we sent it for (0, or the new one after our recovery reset).
+            if stored_pin().is_none() && epoch == v.seen_epoch && new.first() == Some(&root) {
                 v.rooting = None;
                 match chain::verify(&new) {
-                    Ok(state) => self.settle(&mut v, &sub, epoch, state),
+                    Ok(state) => {
+                        self.settle(&mut v, &sub, epoch, state);
+                        let _ = secrets::update(|s| Ok((s.map(|mut s| (s.recovering = false, s).1), ())));
+                    }
                     Err(e) => self.refuse(&mut v, e),
                 }
             }
@@ -411,7 +452,14 @@ impl Cloud {
     }
 
     pub fn complete_login(&self, callback: &str) -> Result<(), AuthError> {
-        self.auth.complete(callback).map(|_| ())
+        let signed = self.auth.complete(callback)?;
+        // A recovery sign-in: its id_token (nonce = this socket's challenge) is the relay's proof for the reset.
+        if std::mem::take(&mut *lock(&self.recovery)) {
+            let id_token = signed.id_token.ok_or_else(|| AuthError::Invalid("id_token".into()))?;
+            *lock(&self.asked) = true;
+            let _ = self.out.send(Cmd::Text(json!({ "t": "chain.reset", "id_token": id_token })));
+        }
+        Ok(())
     }
 
     pub fn sign_out(&self) -> Result<(), AuthError> {
@@ -446,15 +494,23 @@ impl Handler for Cloud {
                 let entries = serde_json::from_value::<Vec<Entry>>(m["entries"].clone()).unwrap_or_default();
                 self.on_entries(m["epoch"].as_u64().unwrap_or(u64::MAX), entries);
             }
-            Some("reset.pending") => {
+            Some("reset.pending") | Some("reset.claimed") => {
                 let member = {
                     let mut v = lock(&self.view);
-                    v.reset_at = m["at"].as_i64();
+                    v.reset_at = m["at"].as_i64().or(v.reset_at);
                     v.trust == Trust::Member
                 };
                 if member {
                     let _ = self.out.send(Cmd::Text(json!({ "t": "chain.veto" })));
+                } else if std::mem::take(&mut *lock(&self.asked)) {
+                    // Our own request was taken: from now on this machine roots the chain once it is empty.
+                    let _ = secrets::update(|s| Ok((s.map(|mut s| (s.recovering = true, s).1), ())));
+                    let mut v = lock(&self.view);
+                    self.root_if_recovering(&mut v);
                 }
+            }
+            Some("error") if *lock(&self.asked) && matches!(m["code"].as_str(), Some("login_required" | "member" | "empty" | "reset_pending" | "reset_soon")) => {
+                *lock(&self.asked) = false;
             }
             Some("reset.vetoed") => lock(&self.view).reset_at = None,
             Some("reset") => {
@@ -468,6 +524,7 @@ impl Handler for Cloud {
                 } else {
                     v.trust = Trust::NotPaired;
                 }
+                self.root_if_recovering(&mut v);
                 drop(v);
                 lock(&self.peers).retain(&chain::Members::new());
             }

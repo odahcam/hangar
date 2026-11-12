@@ -9,7 +9,7 @@ fn identity() -> Identity {
     for x in &mut k {
         getrandom::fill(x).unwrap();
     }
-    Identity::from_secrets(&Secrets { ed25519: b64(&k[0]), x25519: b64(&k[1]), refresh: String::new(), pin: String::new(), refresh_sent_at: 0 }).unwrap()
+    Identity::from_secrets(&Secrets { ed25519: b64(&k[0]), x25519: b64(&k[1]), refresh: String::new(), pin: String::new(), refresh_sent_at: 0, recovering: false }).unwrap()
 }
 
 struct Node {
