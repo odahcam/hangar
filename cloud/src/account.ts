@@ -13,6 +13,7 @@
 //                                                           a grace period, and only this device may root the new chain
 //   app → relay  {t:"chain.veto"}                           a member cancels a pending reset
 //   relay → app  {t:"chain", epoch, entries} | {t:"reset", epoch} | {t:"reset.pending", at} | {t:"reset.vetoed"}
+//   relay → app  {t:"reset.claimed"}                        after a reset, the root now belongs to this device
 //   relay → app  {t:"presence", online} | {t:"offline", device} | {t:"error", code} | {t:"auth.ok", exp}
 //   binary       app → relay: 32-byte recipient key ‖ payload;  relay → app: 32-byte sender key ‖ payload
 import { DurableObject } from "cloudflare:workers";
@@ -235,8 +236,14 @@ export class Account extends DurableObject<Env> {
 	private async requestReset(ws: WebSocket, att: Attachment, idToken: unknown): Promise<void> {
 		const c = await this.chain();
 		if (c.members.has(att.device!)) return this.error(ws, "member");
-		if (!c.entries.length) return this.error(ws, "empty");
+		if (!c.entries.length && c.epoch === 0) return this.error(ws, "empty");
 		if (typeof idToken !== "string" || !(await freshLogin(this.env, idToken, att.sub, att.nonce, RECENT_LOGIN_S))) return this.error(ws, "login_required");
+		// Reset already ran but its device never rooted the new chain (it lost its key, say): with no member left to
+		// veto, a fresh sign-in just hands the root to this device.
+		if (!c.entries.length) {
+			this.setMeta("reset_by", att.device!);
+			return void ws.send(JSON.stringify({ t: "reset.claimed" }));
+		}
 		if (this.meta("reset_due")) return this.error(ws, "reset_pending");
 		if (Date.now() - Number(this.meta("reset_requested") ?? 0) < RESET_EVERY_MS) return this.error(ws, "reset_soon");
 		const due = Date.now() + RESET_GRACE_MS;

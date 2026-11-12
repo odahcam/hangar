@@ -428,8 +428,15 @@ describe("recovery reset", () => {
 		const [cy] = await online(y);
 		cy.send({ t: "chain.append", entry: await root(y) });
 		expect((await cy.json("error")).code).toBe("root");
+		// x lost its key before rooting: a fresh sign-in on another device takes the root over, with no grace period.
+		cy.send({ t: "chain.reset", id_token: await idToken({ nonce: cy.nonce, auth_time: now() - 3600 }) });
+		expect((await cy.json("error")).code).toBe("login_required");
+		cy.send({ t: "chain.reset", id_token: await idToken({ nonce: cy.nonce }) });
+		await cy.json("reset.claimed");
 		cx.send({ t: "chain.append", entry: await root(x) });
-		expect((await cx.json("chain")).epoch).toBe(1);
+		expect((await cx.json("error")).code).toBe("root");
+		cy.send({ t: "chain.append", entry: await root(y) });
+		expect((await cy.json("chain")).epoch).toBe(1);
 	});
 
 	it("is announced to members, who can veto it", async () => {
