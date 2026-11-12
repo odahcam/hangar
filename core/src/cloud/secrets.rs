@@ -1,9 +1,11 @@
 // The device's secrets: its Ed25519 identity seed, its X25519 Noise key and the account's refresh token, kept together
 // in one item of the OS credential store (Keychain on macOS, Credential Manager on Windows). One item means one
-// "allow" prompt after an update re-signs the app, not three. The Keychain item is created by Hangar, so its ACL
-// trusts only Hangar's code signature; other processes of the user get a prompt instead of a silent read.
+// "allow" prompt after an update re-signs the app, not three. On macOS the item is created by Hangar, so its ACL
+// trusts only Hangar's code signature; other processes of the user get a prompt instead of a silent read. On Windows
+// the Credential Manager has no per-app ACL: any process of the user can read the item.
 //
-// HANGAR_SECRETS_DIR swaps the store for a plain file in that folder: tests only, never set by the app.
+// HANGAR_SECRETS_DIR swaps the store for a plain file in that folder, in debug builds only (the test suites): a
+// release build ignores it, so whoever can set the user's environment can't move the secrets out of the store.
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -20,9 +22,16 @@ pub struct Secrets {
     /// The current refresh token of auth.odahcam.com, empty when signed out.
     #[serde(default)]
     pub refresh: String,
+    /// The device chain as this machine last accepted it (chain::Pin as JSON), empty before pairing. Kept here and
+    /// not in state.db, so a local process that can write Hangar's data folder can't rewrite what is trusted.
+    #[serde(default)]
+    pub pin: String,
 }
 
 fn test_dir() -> Option<PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
     std::env::var_os("HANGAR_SECRETS_DIR").filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 

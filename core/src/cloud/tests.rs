@@ -30,7 +30,7 @@ fn shared_chain_cases() {
 }
 
 fn identity() -> Identity {
-    Identity::from_secrets(&Secrets { ed25519: b64(&rand32()), x25519: b64(&rand32()), refresh: String::new() }).unwrap()
+    Identity::from_secrets(&Secrets { ed25519: b64(&rand32()), x25519: b64(&rand32()), refresh: String::new(), pin: String::new() }).unwrap()
 }
 
 fn rand32() -> [u8; 32] {

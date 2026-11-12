@@ -33,6 +33,13 @@ const cases = {
 	wrong_sig: { entries: [{ body: rootText, sig: b.sign(rootText) }], error: "sig" },
 	removed_signer: { entries: [root, addB, addCbyB, removeA, entry(a, canonical({ v: 1, seq: 4, prev: digest(removeA.body), op: "add", device: device().pub, dh: b.dh, signer: a.pub }))], error: "signer" },
 	bad_prev: { entries: [root, entry(a, canonical({ v: 1, seq: 1, prev: digest("x"), op: "add", device: b.pub, dh: b.dh, signer: a.pub }))], error: "prev" },
+	// The same 32 bytes with the last character's spare bits set: only the canonical spelling is a key.
+	loose_key: (() => {
+		const last = a.pub.at(-1);
+		const i = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".indexOf(last);
+		const loose = a.pub.slice(0, -1) + "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"[i ^ 1];
+		return { entries: [entry(a, canonical({ v: 1, seq: 0, prev: "", op: "root", device: loose, dh: a.dh, signer: loose }))], error: "malformed" };
+	})(),
 	second_root: { entries: [root, entry(b, canonical({ v: 1, seq: 1, prev: digest(root.body), op: "root", device: b.pub, dh: b.dh, signer: b.pub }))], error: "root" },
 };
 writeFileSync(new URL("./chain.json", import.meta.url), JSON.stringify(cases, null, "\t") + "\n");

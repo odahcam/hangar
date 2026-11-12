@@ -42,12 +42,22 @@ export function unb64url(s: string): Uint8Array {
 	return Uint8Array.from(bin, (c) => c.charCodeAt(0));
 }
 
+// atob ignores the last character's spare bits, so two spellings decode to the same bytes; the Hangar core decodes
+// strictly. Only the spelling that re-encodes to itself is accepted, so both sides read every key and signature alike.
+function strict(s: string): boolean {
+	try {
+		return b64url(unb64url(s)) === s;
+	} catch {
+		return false;
+	}
+}
+
 export function isKey(s: unknown): s is string {
-	return typeof s === "string" && B64URL_32.test(s);
+	return typeof s === "string" && B64URL_32.test(s) && strict(s);
 }
 
 export async function verifySig(pub: string, sig: string, data: Uint8Array): Promise<boolean> {
-	if (!isKey(pub) || typeof sig !== "string" || !B64URL_64.test(sig)) return false;
+	if (!isKey(pub) || typeof sig !== "string" || !B64URL_64.test(sig) || !strict(sig)) return false;
 	try {
 		const key = await crypto.subtle.importKey("raw", unb64url(pub), { name: "Ed25519" }, false, ["verify"]);
 		return await crypto.subtle.verify("Ed25519", key, unb64url(sig), data);

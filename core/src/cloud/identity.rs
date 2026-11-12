@@ -23,7 +23,7 @@ impl Identity {
         let mut seed = Zeroizing::new([0u8; 32]);
         let mut dh = Zeroizing::new([0u8; 32]);
         getrandom::fill(seed.as_mut()).and_then(|_| getrandom::fill(dh.as_mut())).map_err(|e| e.to_string())?;
-        let s = Secrets { ed25519: b64(seed.as_ref()), x25519: b64(dh.as_ref()), refresh: String::new() };
+        let s = Secrets { ed25519: b64(seed.as_ref()), x25519: b64(dh.as_ref()), refresh: String::new(), pin: String::new() };
         secrets::store(&s)?;
         Identity::from_secrets(&s)
     }

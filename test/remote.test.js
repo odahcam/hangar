@@ -45,19 +45,24 @@ test("a paired device reaches the sessions, never accounts, transfers, the class
   assert.deepEqual(calls(w, "claude"), []);
 });
 
-test("every remote request is logged with its device, refused ones too", async () => {
+test("remote changes and refusals are logged with their device; reads are counted, not logged", async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
   srv = await startServer(w, { HANGAR_TEST_REMOTE: "1" });
   await remote("GET", "/api/sessions");
   await srv.api("PATCH", "/api/remote", { enabled: true });
   await remote("PATCH", `/api/session/${s.id}`, { status: "doing" });
+  for (let i = 0; i < 3; i++) await remote("GET", "/api/sessions");
   await remote("POST", "/api/classify");
-  const { log } = (await srv.api("GET", "/api/remote")).json;
-  assert.deepEqual(log.map((e) => [e.device, e.method, e.path, e.status]), [
+  await remote("POST", "/api/" + "x".repeat(500));
+  const { log, reads } = (await srv.api("GET", "/api/remote")).json;
+  assert.deepEqual(log.map((e) => [e.device, e.method, e.path.slice(0, 13), e.status]), [
+    [DEVICE, "POST", "/api/xxxxxxxx", 403],
     [DEVICE, "POST", "/api/classify", 403],
-    [DEVICE, "PATCH", `/api/session/${s.id}`, 200],
+    [DEVICE, "PATCH", `/api/session/`, 200],
     [DEVICE, "GET", "/api/sessions", 403],
   ]);
+  assert.equal(log[0].path.length, 120);
+  assert.deepEqual(reads.map((r) => [r.device, r.count]), [[DEVICE, 3]]);
 });
 
 test("the remote header means nothing without the test switch", async () => {

@@ -2,6 +2,7 @@
 // that follow) the session with auth.odahcam.com and the relay at hangar.odahcam.com.
 pub mod chain;
 pub mod identity;
+pub mod oauth;
 pub mod secrets;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -15,5 +16,7 @@ pub(crate) fn unb64(s: &str) -> Option<Vec<u8>> {
     URL_SAFE_NO_PAD.decode(s).ok()
 }
 
+#[cfg(test)]
+mod oauth_tests;
 #[cfg(test)]
 mod tests;
