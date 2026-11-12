@@ -12,8 +12,8 @@
 //                                                           sign-in with nonce = this socket's challenge; runs after
 //                                                           a grace period, and only this device may root the new chain
 //   app → relay  {t:"chain.veto"}                           a member cancels a pending reset
-//   relay → app  {t:"chain", epoch, entries} | {t:"reset", epoch} | {t:"reset.pending", at} | {t:"reset.vetoed"}
-//   relay → app  {t:"reset.claimed"}                        after a reset, the root now belongs to this device
+//   relay → app  {t:"chain", epoch, entries} | {t:"reset", epoch} | {t:"reset.pending", at, by} | {t:"reset.vetoed"}
+//   relay → app  {t:"reset.claimed", by}                    after a reset, the root now belongs to device `by`
 //   relay → app  {t:"presence", online} | {t:"offline", device} | {t:"error", code} | {t:"auth.ok", exp}
 //   binary       app → relay: 32-byte recipient key ‖ payload;  relay → app: 32-byte sender key ‖ payload
 import { DurableObject } from "cloudflare:workers";
@@ -242,7 +242,7 @@ export class Account extends DurableObject<Env> {
 		// veto, a fresh sign-in just hands the root to this device.
 		if (!c.entries.length) {
 			this.setMeta("reset_by", att.device!);
-			return void ws.send(JSON.stringify({ t: "reset.claimed" }));
+			return void ws.send(JSON.stringify({ t: "reset.claimed", by: att.device }));
 		}
 		if (this.meta("reset_due")) return this.error(ws, "reset_pending");
 		if (Date.now() - Number(this.meta("reset_requested") ?? 0) < RESET_EVERY_MS) return this.error(ws, "reset_soon");
@@ -250,7 +250,7 @@ export class Account extends DurableObject<Env> {
 		this.setMeta("reset_due", String(due));
 		this.setMeta("reset_requested", String(Date.now()));
 		this.setMeta("reset_by", att.device!);
-		this.broadcast({ t: "reset.pending", at: due });
+		this.broadcast({ t: "reset.pending", at: due, by: att.device });
 		await this.schedule();
 	}
 

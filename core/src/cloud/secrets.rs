@@ -31,10 +31,10 @@ pub struct Secrets {
     /// be sent again, since a retired token's reuse revokes every machine of the account.
     #[serde(default)]
     pub refresh_sent_at: i64,
-    /// The person asked, on this machine, to recover the account's device chain (every machine lost): once the
-    /// relay resets it, this machine drops its pin and roots the new chain.
+    /// A recovery this machine asked for and the relay took, as "<account>\n<epoch before the reset>"; empty when none.
+    /// Only in the epoch right after that one, for that account, does this machine root the new chain.
     #[serde(default)]
-    pub recovering: bool,
+    pub recover: String,
 }
 
 fn test_dir() -> Option<PathBuf> {

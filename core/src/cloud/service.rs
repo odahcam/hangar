@@ -207,6 +207,8 @@ impl Cloud {
                 if let Some(p) = pin_of(sub, epoch, &state) {
                     save_pin(&p);
                 }
+                // A member has nothing left to recover.
+                Self::set_recover(String::new());
                 v.trust = Trust::Member;
                 v.epoch = epoch;
                 v.state = state;
@@ -254,13 +256,22 @@ impl Cloud {
         let _ = self.out.send(Cmd::Text(json!({ "t": "chain.append", "entry": entry })));
     }
 
+    /// Whether this machine's own recovery applies now: for this account, in the epoch right after the one it asked in.
+    fn recovering(&self, v: &View) -> bool {
+        let Some(s) = secrets::load().ok().flatten() else { return false };
+        let Some((sub, epoch)) = s.recover.split_once('\n') else { return false };
+        Some(sub) == v.sub.as_deref() && epoch.parse::<u64>().ok().map(|e| e + 1) == Some(v.seen_epoch)
+    }
+
+    fn set_recover(value: String) {
+        let _ = secrets::update(|s| Ok((s.map(|mut s| (s.recover = value, s).1), ())));
+    }
+
     /// After a recovery reset this machine asked for (on this machine, with a fresh sign-in), the relay's chain is
-    /// empty in a new epoch: the old pin goes and this machine roots the new chain. The relay lets only the device
-    /// that asked do it.
+    /// empty in the next epoch: this machine roots the new chain (the relay lets only the device that asked). The
+    /// old pin stays until that root comes back confirmed, so a refused root leaves the machine refusing, not unpaired.
     fn root_if_recovering(&self, v: &mut View) {
-        let recovering = secrets::load().ok().flatten().is_some_and(|s| s.recovering);
-        if recovering && v.seen.is_empty() && v.seen_epoch > 0 && v.rooting.is_none() {
-            let _ = secrets::update(|s| Ok((s.map(|mut s| (s.pin.clear(), s).1), ())));
+        if v.seen.is_empty() && v.rooting.is_none() && self.recovering(v) {
             self.send_root(v);
         }
     }
@@ -301,14 +312,13 @@ impl Cloud {
             }
             self.settle(&mut v, &sub, epoch, state);
         } else if let Some(root) = v.rooting.clone() {
-            // Our own root confirmed, in the epoch we sent it for (0, or the new one after our recovery reset).
-            if stored_pin().is_none() && epoch == v.seen_epoch && new.first() == Some(&root) {
+            // Our own root confirmed: the account's first machine (no pin, epoch 0), or our recovery's new epoch,
+            // where the confirmed root replaces the old pin.
+            let ours = (stored_pin().is_none() && epoch == 0) || self.recovering(&v);
+            if ours && epoch == v.seen_epoch && new.first() == Some(&root) {
                 v.rooting = None;
                 match chain::verify(&new) {
-                    Ok(state) => {
-                        self.settle(&mut v, &sub, epoch, state);
-                        let _ = secrets::update(|s| Ok((s.map(|mut s| (s.recovering = false, s).1), ())));
-                    }
+                    Ok(state) => self.settle(&mut v, &sub, epoch, state),
                     Err(e) => self.refuse(&mut v, e),
                 }
             }
@@ -463,6 +473,7 @@ impl Cloud {
     }
 
     pub fn sign_out(&self) -> Result<(), AuthError> {
+        Self::set_recover(String::new());
         self.auth.sign_out()
     }
 }
@@ -494,25 +505,33 @@ impl Handler for Cloud {
                 let entries = serde_json::from_value::<Vec<Entry>>(m["entries"].clone()).unwrap_or_default();
                 self.on_entries(m["epoch"].as_u64().unwrap_or(u64::MAX), entries);
             }
-            Some("reset.pending") | Some("reset.claimed") => {
-                let member = {
-                    let mut v = lock(&self.view);
-                    v.reset_at = m["at"].as_i64().or(v.reset_at);
-                    v.trust == Trust::Member
-                };
-                if member {
+            Some(kind @ ("reset.pending" | "reset.claimed")) => {
+                let mine = m["by"].as_str() == Some(self.identity.device().as_str());
+                let mut v = lock(&self.view);
+                v.reset_at = m["at"].as_i64().or(v.reset_at);
+                if v.trust == Trust::Member {
+                    drop(v);
                     let _ = self.out.send(Cmd::Text(json!({ "t": "chain.veto" })));
-                } else if std::mem::take(&mut *lock(&self.asked)) {
-                    // Our own request was taken: from now on this machine roots the chain once it is empty.
-                    let _ = secrets::update(|s| Ok((s.map(|mut s| (s.recovering = true, s).1), ())));
-                    let mut v = lock(&self.view);
+                } else if mine && std::mem::take(&mut *lock(&self.asked)) {
+                    // Our own request was taken. A pending reset runs into the next epoch; a claimed one is for the
+                    // empty chain of the current epoch, recorded as "the epoch before" so both read the same way.
+                    let before = if kind == "reset.pending" { v.seen_epoch } else { v.seen_epoch.saturating_sub(1) };
+                    Self::set_recover(format!("{}\n{before}", v.sub.clone().unwrap_or_default()));
                     self.root_if_recovering(&mut v);
                 }
             }
             Some("error") if *lock(&self.asked) && matches!(m["code"].as_str(), Some("login_required" | "member" | "empty" | "reset_pending" | "reset_soon")) => {
                 *lock(&self.asked) = false;
             }
-            Some("reset.vetoed") => lock(&self.view).reset_at = None,
+            Some("error") if m["code"] == "root" => {
+                // The relay refused our root: the recovery isn't ours (any more).
+                Self::set_recover(String::new());
+                lock(&self.view).rooting = None;
+            }
+            Some("reset.vetoed") => {
+                lock(&self.view).reset_at = None;
+                Self::set_recover(String::new());
+            }
             Some("reset") => {
                 let mut v = lock(&self.view);
                 v.reset_at = None;

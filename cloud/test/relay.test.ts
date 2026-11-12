@@ -418,7 +418,8 @@ describe("recovery reset", () => {
 		const x = await device();
 		const [cx] = await online(x);
 		cx.send({ t: "chain.reset", id_token: await idToken({ nonce: cx.nonce }) });
-		await ca.json("reset.pending");
+		// Everyone is told who asked: only that device treats the reset as its own.
+		expect((await ca.json("reset.pending")).by).toBe(x.pub);
 		await runInDurableObject(stub(), async (_o, state) => {
 			state.storage.sql.exec("update meta set value = '1' where key = 'reset_due'");
 		});
@@ -432,7 +433,7 @@ describe("recovery reset", () => {
 		cy.send({ t: "chain.reset", id_token: await idToken({ nonce: cy.nonce, auth_time: now() - 3600 }) });
 		expect((await cy.json("error")).code).toBe("login_required");
 		cy.send({ t: "chain.reset", id_token: await idToken({ nonce: cy.nonce }) });
-		await cy.json("reset.claimed");
+		expect((await cy.json("reset.claimed")).by).toBe(y.pub);
 		cx.send({ t: "chain.append", entry: await root(x) });
 		expect((await cx.json("error")).code).toBe("root");
 		cy.send({ t: "chain.append", entry: await root(y) });
