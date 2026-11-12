@@ -19,8 +19,10 @@ const JWKS = { keys: [{ crv: "Ed25519", x: JWK.x, kty: "OKP", kid: "test", alg: 
 const AUD = "https://hangar.odahcam.com";
 const b64 = (s) => Buffer.from(s).toString("base64url");
 
-let issuer, issuerUrl, relay, relayUrl;
+let issuer, issuerUrl, relay, relayUrl, relayState;
 const worlds = [], servers = [];
+// A fresh account each run: the relay's storage would otherwise remember the last run's chain.
+const SUB = `user-${crypto.randomUUID()}`;
 
 function jwt(claims) {
   const head = b64(JSON.stringify({ alg: "EdDSA", kid: "test" }));
@@ -45,7 +47,7 @@ before(async () => {
     req.on("end", () => {
       const now = Math.floor(Date.now() / 1000);
       if (req.url === "/api/auth/oauth2/token") {
-        const access = jwt({ iss: issuerUrl, aud: [AUD], azp: "hangar", sub: "user-1", iat: now, exp: now + 3600 });
+        const access = jwt({ iss: issuerUrl, aud: [AUD], azp: "hangar", sub: SUB, iat: now, exp: now + 3600 });
         res.end(JSON.stringify({ access_token: access, refresh_token: crypto.randomUUID(), token_type: "Bearer" }));
       } else if (req.url === "/api/oauth2/refresh-status") {
         res.end(JSON.stringify({ status: "current" }));
@@ -61,7 +63,8 @@ before(async () => {
   const port = await freePort();
   relayUrl = `ws://127.0.0.1:${port}/v1/connect`;
   const vars = { ISSUER: issuerUrl, JWKS: JSON.stringify(JWKS), ALLOWED_SUBS: "*" };
-  relay = spawn("npx", ["wrangler", "dev", "--local", "--ip", "127.0.0.1", "--port", String(port), "--show-interactive-dev-session=false",
+  relayState = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "hangar-relay-"));
+  relay = spawn("npx", ["wrangler", "dev", "--local", "--ip", "127.0.0.1", "--port", String(port), "--show-interactive-dev-session=false", "--persist-to", relayState,
     ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`])], { cwd: CLOUD, stdio: ["ignore", "pipe", "pipe"], detached: true });
   let log = "";
   await new Promise((resolve, reject) => {
@@ -77,6 +80,7 @@ after(async () => {
   for (const s of servers) await s.stop();
   for (const w of worlds) cleanup(w);
   if (relay) { relay.removeAllListeners("exit"); try { process.kill(-relay.pid, "SIGKILL"); } catch {} }
+  if (relayState) fs.rmSync(relayState, { recursive: true, force: true });
   issuer?.close();
 });
 
