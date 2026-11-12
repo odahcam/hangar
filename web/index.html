@@ -204,9 +204,11 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
   <header>
     <h1>Hangar</h1>
     <span class="counts" id="counts" data-i18n="loading"></span>
+    <select id="machine" data-i18n-label="machine" hidden></select>
     <select id="locale" data-i18n-label="language"><option value="en">English</option><option value="pt">Português</option></select>
     <button class="btn" id="settingsBtn" data-i18n-label="settings">⚙</button>
   </header>
+  <div class="warn-box" id="remoteBanner" hidden></div>
   <div class="tiles" id="tiles"></div>
   <nav id="tabs">
     <button data-v="pending" data-i18n="tabPending"></button>
@@ -268,9 +270,20 @@ function showView(v) {
   render();
 }
 
+// The machine whose sessions are shown: "" is this one, otherwise another machine of the odahcam account, reached
+// through the relay. Only what that machine lets a paired device do goes there (see core/src/remote.rs); everything
+// else, settings included, stays on this machine.
+let cloud = null, remote = null, machine = "", machineNames = {};
+try { machine = localStorage.getItem("machine") || ""; } catch {}
+const REMOTE_OK = /^(GET \/api\/(sessions|accounts|machine)$|PATCH \/api\/session\/|POST \/api\/(order$|resume\/|close\/|dismiss-suggestion\/))/;
+async function api(method, path, body) {
+  if (machine && REMOTE_OK.test(`${method} ${path}`)) return apiLocal("POST", "/api/cloud/call", { device: machine, method, path, body: body ?? null });
+  return apiLocal(method, path, body);
+}
+
 // The desktop app calls the core in-process (Tauri invoke); in a browser (tests, `npm start`) the same API is HTTP.
 // Looked up per call so the desktop e2e target can stand in for a slow or failing core.
-async function api(method, path, body) {
+async function apiLocal(method, path, body) {
   const core = window.__TAURI__?.core;
   if (core) return core.invoke("api", { method, path, body: body ?? null }).catch((e) => { throw new Error(e); });
   const r = await fetch(path, { method, headers: { "x-hangar": "1", "content-type": "application/json" }, body: body && JSON.stringify(body) });
@@ -370,12 +383,16 @@ function select(id, { openDetail = true, focus = false, toggle = false } = {}) {
 function render() {
   const ins = view === "insights", set = view === "settings";
   $("#insights").hidden = !ins; $("#settings").hidden = !set; $("#toolbar").hidden = ins || set; $("#split").hidden = ins || set;
-  $("#tabs").hidden = set; $("#tiles").hidden = set; $("#checkNow").hidden = view !== "pending";
+  // Another machine shows its sessions only: insights, tiles and done detection are this machine's.
+  $("#tabs").hidden = set; $("#tiles").hidden = set || !!machine; $("#checkNow").hidden = view !== "pending" || !!machine;
+  $("#tabs [data-v=insights]").hidden = !!machine;
+  $("#remoteBanner").hidden = !machine || set;
+  if (machine) $("#remoteBanner").textContent = t("controlling", { name: machineName(machine) });
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-pressed", b.dataset.v === view);
   $("#settingsBtn").setAttribute("aria-pressed", set);
   if (ins || set) $("#empty").hidden = true;
   if (ins) return loadInsights();
-  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), accountsPanel(), classifierSettings());
+  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), accountsPanel(), classifierSettings(), cloudPanel(), remotePanel());
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
   const acct = multi() ? $("#acct").value : "";
   const byPrompts = $("#sort").value === "prompt";
@@ -837,6 +854,85 @@ function classifierSettings() {
   ]);
 }
 
+// --- Remote control: the odahcam account, this machine's place among its machines, and pairing.
+const short = (device) => device ? device.slice(0, 8) : "";
+const machineName = (device) => machineNames[device] || short(device);
+// The sign-in page opens in the default browser: the desktop app hands any outside address to it (see main.rs).
+function openExternal(url) { if (window.__TAURI__) location.assign(url); else window.open(url, "_blank", "noopener"); }
+// Called by the desktop app once the browser sends the hangar:// link back.
+window.cloudLinked = (err) => { toast(err ? failed(new Error(err)) : t("signedIn")); load(); };
+
+async function loadCloud() {
+  try {
+    cloud = await apiLocal("GET", "/api/cloud");
+    remote = cloud.link.state === "off" ? null : await apiLocal("GET", "/api/remote");
+  } catch { cloud = null; }
+  const others = cloud?.machines?.filter((m) => !m.me) || [];
+  // Names come from each machine, once; one that is offline keeps its short key until it answers.
+  await Promise.all(others.filter((m) => m.online && !machineNames[m.device]).map(async (m) => {
+    try { machineNames[m.device] = (await apiLocal("POST", "/api/cloud/call", { device: m.device, method: "GET", path: "/api/machine" })).name || short(m.device); } catch {}
+  }));
+  if (machine && !others.some((m) => m.device === machine)) { machine = ""; try { localStorage.removeItem("machine"); } catch {} }
+  const sel = $("#machine");
+  sel.replaceChildren(el("option", { value: "", text: t("thisMachine") }),
+    ...others.map((m) => el("option", { value: m.device, text: machineName(m.device) + (m.online ? "" : " " + t("offlineL")), disabled: m.online ? false : "" })));
+  sel.value = machine;
+  sel.hidden = !others.length;
+}
+
+function cloudPanel() {
+  if (!cloud || cloud.link.state === "off") return null;
+  const c = cloud, trust = c.trust?.state, kids = [];
+  const signIn = (path) => act(async () => openExternal((await apiLocal("POST", path)).url));
+  if (c.link.state === "signed_out") {
+    kids.push(el("div", { class: "meta", text: t("cloudSignedOut") }), el("div", {}, [btn(t("signIn"), "", () => signIn("/api/cloud/login"))]));
+    return panel(t("pCloud"), t("pCloudSub"), kids);
+  }
+  kids.push(el("div", { class: "meta" }, [el("span", { text: c.link.state === "online" ? t("cloudOnline") : c.link.state === "retrying" ? t("cloudRetrying") : t("cloudConnecting") }),
+    el("span", { text: t("thisDevice", { id: short(c.device) }) })]));
+  const codeForm = (label) => {
+    const input = el("input", { type: "text", maxlength: 9, placeholder: "ABC-123", "aria-label": t("pairCode"), autocomplete: "off" });
+    const form = el("form", {}, [input, el("button", { class: "btn", type: "submit", text: label })]);
+    form.onsubmit = (e) => { e.preventDefault(); act(() => apiLocal("POST", "/api/cloud/join", { code: input.value })); };
+    return el("div", { class: "accts" }, [form]);
+  };
+  if (trust === "member") {
+    kids.push(...c.machines.map((m) => el("div", { class: "meta" }, [
+      el("span", { text: (m.me ? t("thisMachine") : machineName(m.device)) + (m.online ? "" : " " + t("offlineL")) }),
+      el("span", { class: "dir", text: short(m.device) }),
+      btn(m.me ? t("leave") : t("remove"), "danger", () => act(() => apiLocal("POST", "/api/cloud/remove", { device: m.device }))),
+    ])));
+    if (c.offer) kids.push(el("div", { class: "warn-box" }, [el("strong", { text: c.offer.slice(0, 3) + "-" + c.offer.slice(3) }), el("span", { text: t("offerHint") })]));
+    // Who the last code let in, with a way back: someone else may have read the code first.
+    if (c.joined) kids.push(el("div", { class: "warn-box" }, [el("span", { text: t("joinedNow", { id: short(c.joined) }) }),
+      el("div", {}, [btn(t("undo"), "danger", () => act(() => apiLocal("POST", "/api/cloud/remove", { device: c.joined })))])]));
+    kids.push(el("div", {}, [btn(t("addMachine"), "", () => act(() => apiLocal("POST", "/api/cloud/offer")))]));
+  } else if (trust === "not_paired") {
+    kids.push(el("div", { class: "meta", text: c.joining ? t("pairing") : t("notPaired") }), codeForm(t("pair")));
+    if (c.joinRefused) kids.push(el("div", { class: "warn", text: t("pairRefused") }));
+  } else if (trust === "refused") {
+    kids.push(el("div", { class: "warn", text: t("refusedChain", { why: c.trust.reason }) }), codeForm(t("pairAgain")));
+    if (c.joinRefused) kids.push(el("div", { class: "warn", text: t("pairRefused") }));
+    kids.push(el("div", { class: "meta", text: c.reset ? t("resetPending", { at: new Date(c.reset).toLocaleString() }) : t("recoverHint") }),
+      el("div", {}, [btn(t("recover"), "danger", () => signIn("/api/cloud/recover"))]));
+  }
+  kids.push(el("div", {}, [btn(t("signOut"), "", () => act(() => apiLocal("POST", "/api/cloud/logout")))]));
+  return panel(t("pCloud"), c.account ? t("pCloudAccount", { id: short(c.account) }) : t("pCloudSub"), kids);
+}
+
+// Whether the account's other machines may control this one, and what they did.
+function remotePanel() {
+  if (!cloud || cloud.link.state === "off" || !remote) return null;
+  const box = el("input", { type: "checkbox" });
+  box.checked = remote.enabled;
+  box.onchange = () => act(() => apiLocal("PATCH", "/api/remote", { enabled: box.checked }));
+  const rows = remote.log.slice(0, 10).map((e) => el("div", { class: "meta" }, [el("span", { text: clock(e.at) }), el("span", { text: machineName(e.device) }), el("span", { text: `${e.method} ${e.path}` })]));
+  const denied = remote.denied.slice(0, 5).map((e) => el("div", { class: "meta warn" }, [el("span", { text: clock(e.at) }), el("span", { text: machineName(e.device) }),
+    el("span", { text: t("deniedRow", { what: `${e.method} ${e.path}`, n: e.count }) })]));
+  return panel(t("pRemote"), t("pRemoteSub"), [el("label", { class: "btn" }, [box, " " + t("allowRemote")]),
+    ...(rows.length ? rows : [el("div", { class: "meta", text: t("noRemoteYet") })]), ...denied]);
+}
+
 async function loadInsights() {
   let d;
   try { d = await api("GET", "/api/insights"); } catch (e) { $("#insights").replaceChildren(el("div", { class: "empty", text: t("loadFailed", { msg: e.message }) })); return; }
@@ -922,7 +1018,13 @@ async function loadInsights() {
 }
 
 async function load() {
-  try { [items, accounts, classifier] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts"), api("GET", "/api/classifier")]); } catch (e) { $("#counts").textContent = t("serverDown", { msg: e.message }); return; }
+  const was = machine;
+  try { [items, accounts, classifier] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts"), api("GET", "/api/classifier"), loadCloud()]); } catch (e) {
+    $("#counts").textContent = machine ? t("machineDown", { name: machineName(machine), msg: failed(e) }) : t("serverDown", { msg: e.message });
+    return;
+  }
+  // The machine shown went away from the account meanwhile: show this one's sessions instead.
+  if (machine !== was) return load();
   const sel = $("#proj"), cur = sel.value;
   sel.replaceChildren(el("option", { value: "", text: t("allProjects") }), ...[...new Set(items.map((s) => s.project).filter(Boolean))].sort().map((p) => el("option", { value: p, text: p })));
   sel.value = cur;
@@ -932,9 +1034,24 @@ async function load() {
   asel.hidden = !multi();
   const focused = document.activeElement?.id;
   render();
-  if (view !== "insights") loadTiles();
+  if (view !== "insights" && !machine) loadTiles();
   if (focused) document.getElementById(focused)?.focus();
 }
+
+$("#machine").onchange = (e) => {
+  machine = e.target.value;
+  try { machine ? localStorage.setItem("machine", machine) : localStorage.removeItem("machine"); } catch {}
+  selectedId = null;
+  if (machine && view === "insights") showView("pending");
+  load();
+};
+// Pairing and sign-in move on their own (a code typed elsewhere, a browser coming back): Settings follows them.
+setInterval(async () => {
+  if (view !== "settings" || document.hidden) return;
+  const before = JSON.stringify([cloud, remote]);
+  await loadCloud();
+  if (JSON.stringify([cloud, remote]) !== before && !document.activeElement?.matches("input[type=text]")) render();
+}, 2000);
 
 $("#tabs").onclick = (e) => { const v = e.target.dataset?.v; if (v) showView(v); };
 $("#settingsBtn").onclick = () => view === "settings" ? settingsBack() : showView("settings");

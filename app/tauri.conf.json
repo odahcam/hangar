@@ -13,6 +13,13 @@
       "csp": null
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["hangar"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["app", "nsis"],

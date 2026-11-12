@@ -81,6 +81,10 @@ pub struct Cloud {
     recovery: Mutex<bool>,
     /// A chain.reset was sent and the relay hasn't answered it yet.
     asked: Mutex<bool>,
+    /// The device the last code added, for the UI to show.
+    joined: Mutex<Option<String>>,
+    /// The last pairing this machine tried was refused.
+    join_refused: AtomicBool,
     stop: Arc<AtomicBool>,
 }
 
@@ -133,6 +137,8 @@ impl Cloud {
             join: Mutex::default(),
             recovery: Mutex::default(),
             asked: Mutex::default(),
+            joined: Mutex::default(),
+            join_refused: AtomicBool::new(false),
             stop: Arc::new(AtomicBool::new(false)),
         });
         let (auth, handler, stop) = (Arc::clone(&cloud.auth), Arc::clone(&cloud) as Arc<dyn Handler>, Arc::clone(&cloud.stop));
@@ -172,7 +178,8 @@ impl Cloud {
             vec![]
         };
         let offer = lock(&self.offer).as_ref().filter(|o| o.live()).map(|o| o.code().to_string());
-        json!({ "link": link, "account": v.sub, "device": me, "trust": v.trust, "machines": machines, "reset": v.reset_at, "offer": offer, "joining": lock(&self.join).as_ref().is_some_and(|j| j.live()) })
+        json!({ "link": link, "account": v.sub, "device": me, "trust": v.trust, "machines": machines, "reset": v.reset_at, "offer": offer,
+            "joining": lock(&self.join).as_ref().is_some_and(|j| j.live()), "joinRefused": self.join_refused.load(Ordering::SeqCst), "joined": *lock(&self.joined) })
     }
 
     /// Calls `method path` on another machine of the account and waits for its reply.
@@ -333,12 +340,33 @@ impl Cloud {
             if o.accepted.as_ref().is_some_and(|(d, _, _)| added_for_offer.members.contains_key(d)) {
                 if let Some(pin) = pin_of(&sub, epoch, &added_for_offer) {
                     if let Some((to, f)) = o.pin(&pin) {
+                        // Shown on this machine with a way to undo: a code read off the screen by someone else adds
+                        // their device, not the one the person meant.
+                        *lock(&self.joined) = Some(to.clone());
                         self.send(vec![(to, f)]);
                     }
                 }
                 *offer = None;
             }
         }
+    }
+
+    /// POST /api/cloud/remove {device}: takes a machine out of the chain (another one, or this one).
+    pub fn remove(&self, device: &str) -> Result<(), String> {
+        let v = lock(&self.view);
+        if v.trust != Trust::Member {
+            return Err("not_member".into());
+        }
+        if !v.state.members.contains_key(device) {
+            return Err("unknown_machine".into());
+        }
+        let me = self.identity.device();
+        let body = Body { v: 1, seq: v.state.len as u64, prev: v.state.digest.clone(), op: "remove".into(), device: device.into(), dh: None, signer: me };
+        drop(v);
+        let text = body.canonical();
+        let entry = Entry { sig: self.identity.sign(text.as_bytes()), body: text };
+        let _ = self.out.send(Cmd::Text(json!({ "t": "chain.append", "entry": entry })));
+        Ok(())
     }
 
     /// POST /api/cloud/offer: shows a code on this machine (a member) for a new one to type.
@@ -349,6 +377,7 @@ impl Cloud {
         let o = Offer::new();
         let code = o.code().to_string();
         *lock(&self.offer) = Some(o);
+        *lock(&self.joined) = None;
         Ok(code)
     }
 
@@ -367,6 +396,7 @@ impl Cloud {
         }
         let (j, frames) = Join::new(&self.identity.device(), code, &targets);
         *lock(&self.join) = Some(j);
+        self.join_refused.store(false, Ordering::SeqCst);
         self.send(frames);
         Ok(())
     }
@@ -412,7 +442,10 @@ impl Cloud {
                     Err(e) => self.refuse(&mut v, e),
                 }
             }
-            JoinStep::Refused => *lock(&self.join) = None,
+            JoinStep::Refused => {
+                *lock(&self.join) = None;
+                self.join_refused.store(true, Ordering::SeqCst);
+            }
             JoinStep::Nothing => {}
         }
     }

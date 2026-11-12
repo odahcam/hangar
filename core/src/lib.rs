@@ -191,6 +191,7 @@ impl Hangar {
             ("POST", "login") => Ok(json!({ "url": c.begin_login() })),
             ("POST", "callback") => auth(c.complete_login(body["url"].as_str().unwrap_or(""))),
             ("POST", "logout") => auth(c.sign_out()),
+            ("POST", "remove") => c.remove(body["device"].as_str().unwrap_or("")).map(|_| json!({ "ok": true })).map_err(|e| ApiError(409, e)),
             ("POST", "recover") => c.begin_recovery().map(|url| json!({ "url": url })).map_err(|e| ApiError(409, e)),
             ("POST", "offer") => c.offer().map(|code| json!({ "code": code })).map_err(|e| ApiError(409, e)),
             ("POST", "join") => c.join(body["code"].as_str().unwrap_or("")).map(|_| json!({ "ok": true })).map_err(|e| ApiError(409, e)),
