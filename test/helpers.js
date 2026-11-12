@@ -126,6 +126,8 @@ async function startServer(w, env = {}) {
       FAKE_TABS: w.tabs,
       FAKE_VERDICTS: w.verdicts,
       HANGAR_CLASSIFY_START_MS: "3600000",
+      // Quoting tests assume a POSIX login shell, whatever the machine running them uses.
+      HANGAR_LOGIN_SHELL: "/bin/zsh",
       NODE_NO_WARNINGS: "1",
       ...env,
     },

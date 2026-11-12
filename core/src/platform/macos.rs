@@ -36,6 +36,27 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+// Terminal types `do script` into the user's login shell. sh_quote is POSIX quoting: in fish \' and \\ are escapes
+// inside single quotes and csh/tcsh expand ! there, so for those shells a path with one of them is refused rather
+// than typed. Overridable so tests can stand in for the account's shell.
+static LOGIN_SHELL: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("HANGAR_LOGIN_SHELL").unwrap_or_else(|_| {
+        // SAFETY: getpwuid returns a pointer into static storage or null; it is read once, here, before any other call.
+        unsafe {
+            let pw = libc::getpwuid(libc::getuid());
+            if pw.is_null() || (*pw).pw_shell.is_null() {
+                return String::new();
+            }
+            std::ffi::CStr::from_ptr((*pw).pw_shell).to_string_lossy().into_owned()
+        }
+    })
+});
+
+fn posix_typable(s: &str) -> bool {
+    let shell = Path::new(LOGIN_SHELL.as_str()).file_name().and_then(OsStr::to_str).unwrap_or("");
+    matches!(shell, "zsh" | "bash" | "sh" | "ksh" | "dash") || !s.contains(['\'', '\\', '!'])
+}
+
 fn tab_script(tty: &str, body: &str) -> String {
     format!(
         "tell application \"Terminal\"\nrepeat with w in windows\nrepeat with t in tabs of w\nif tty of t is {} then\n{body}\nreturn \"ok\"\nend if\nend repeat\nend repeat\nend tell\nreturn \"missing\"",
@@ -95,6 +116,9 @@ impl Platform for MacOs {
     }
 
     fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String> {
+        if !posix_typable(cwd) || config.is_some_and(|d| !posix_typable(&d.to_string_lossy())) {
+            return Err("unsupported_path".into());
+        }
         let env = match config {
             Some(dir) => format!("CLAUDE_CONFIG_DIR={} ", sh_quote(&dir.to_string_lossy())),
             None => "unset CLAUDE_CONFIG_DIR && ".into(),

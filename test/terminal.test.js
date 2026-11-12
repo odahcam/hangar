@@ -75,6 +75,28 @@ test("a session with no message whose project name fits no single folder is refu
   assert.deepEqual(calls(w, "wt"), []);
 });
 
+test("a cwd with a control character or no root is refused, not typed into the terminal", async () => {
+  const bad = [addSession(w, { cwd: "/work/a\u0003b", turns: [{ user: "a" }] }), addSession(w, { cwd: "/work/a\u001bb", turns: [{ user: "a" }] }),
+    addSession(w, { cwd: "work/relative", turns: [{ user: "a" }] })];
+  srv = await startServer(w);
+  for (const s of bad) {
+    const r = await srv.api("POST", `/api/resume/${s.id}`);
+    assert.equal(r.status, 409);
+    assert.deepEqual(r.json, { error: "unsupported_path" });
+  }
+  assert.ok(!calls(w, "osascript").some((c) => c.script.includes("do script")));
+  assert.deepEqual(calls(w, "wt"), []);
+});
+
+test("under a non-POSIX login shell a cwd its quoting can't hold is refused", { skip: !DARWIN }, async () => {
+  const s = addSession(w, { cwd: "/work/it's here", turns: [{ user: "a" }] });
+  const plain = addSession(w, { cwd: "/work/plain", turns: [{ user: "a" }] });
+  srv = await startServer(w, { HANGAR_LOGIN_SHELL: "/opt/homebrew/bin/fish" });
+  assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { error: "unsupported_path" });
+  assert.ok(!calls(w, "osascript").some((c) => c.script.includes("do script")));
+  assert.deepEqual((await srv.api("POST", `/api/resume/${plain.id}`)).json, { opened: true });
+});
+
 test("resuming a live session focuses its tab instead of opening another", { skip: !DARWIN }, async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
   addLive(w, s);
