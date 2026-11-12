@@ -180,12 +180,12 @@ fn sign_in_and_refresh() {
     assert_eq!(sent(), before, "a rotated token is never sent again");
     assert_eq!(secrets::load().unwrap().unwrap().refresh, "");
 
-    // A 5xx after a pending mark keeps the mark: the rotation may have happened before the error.
+    // A 5xx after a pending mark keeps the mark, at the first attempt's time: retries don't slide it past the grace.
     set_refresh("refresh-w", long_ago() + 20_000);
     iss.script.lock().unwrap().push((503, "{}".into()));
     let marked = secrets::load().unwrap().unwrap().refresh_sent_at;
     assert!(Auth::new().access().is_err());
-    assert!(secrets::load().unwrap().unwrap().refresh_sent_at >= marked);
+    assert_eq!(secrets::load().unwrap().unwrap().refresh_sent_at, marked);
 
     // A request that never left this machine (nothing listening) leaves no mark behind.
     set_refresh("refresh-v", 0);

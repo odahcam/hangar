@@ -2,9 +2,11 @@
 // that follow) the session with auth.odahcam.com and the relay at hangar.odahcam.com.
 pub mod chain;
 pub mod identity;
+pub mod link;
 pub mod oauth;
 pub mod peer;
 pub mod secrets;
+pub mod service;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;

@@ -24,6 +24,9 @@ const CHUNK: usize = MAX_NOISE - 16 - 1;
 pub const MAX_MESSAGE: usize = 8 * 1024 * 1024;
 /// Sessions are replaced after this long, so no key lives for days.
 const SESSION_TTL: Duration = Duration::from_secs(3600);
+/// A handshake that hasn't completed by then is dropped with what was waiting on it: a reply the relay held back
+/// mustn't release old requests whenever it likes.
+const HANDSHAKE_TTL: Duration = Duration::from_secs(10);
 
 const HANDSHAKE: u8 = 1;
 const REPLY: u8 = 2;
@@ -32,6 +35,15 @@ const RESET: u8 = 4;
 
 /// A frame for the relay: recipient device and payload.
 pub type Out = (String, Vec<u8>);
+
+/// A complete message from a peer.
+pub struct Incoming {
+    pub sid: [u8; 8],
+    /// Whether it came on the session this machine started: then it can only be a reply to one of our calls. On the
+    /// peer's session it can only be a call.
+    pub mine: bool,
+    pub message: Vec<u8>,
+}
 
 enum State {
     /// We sent the first handshake message; plaintexts wait for the reply.
@@ -88,7 +100,11 @@ impl Peers {
             return Err("too_big".into());
         }
         let remote = members.get(peer).and_then(|dh| unb64(dh)).ok_or("not_member")?;
-        let sid = self.mine.get(peer).copied().filter(|sid| self.sessions.get(&(peer.to_string(), *sid)).is_some_and(|s| s.started.elapsed() < SESSION_TTL));
+        let live = |s: &Session| match s.state {
+            State::Initiating(..) => s.started.elapsed() < HANDSHAKE_TTL,
+            State::Ready(_) => s.started.elapsed() < SESSION_TTL,
+        };
+        let sid = self.mine.get(peer).copied().filter(|sid| self.sessions.get(&(peer.to_string(), *sid)).is_some_and(live));
         let Some(sid) = sid else {
             let mut sid = [0u8; 8];
             getrandom::fill(&mut sid).map_err(|e| e.to_string())?;
@@ -119,9 +135,9 @@ impl Peers {
         }
     }
 
-    /// Takes a frame from `from` (stamped by the relay). Returns frames to send back and complete plaintexts with the
-    /// session they came on. Frames from devices outside the chain are dropped before any crypto.
-    pub fn receive(&mut self, members: &Members, from: &str, f: &[u8]) -> (Vec<Out>, Vec<([u8; 8], Vec<u8>)>) {
+    /// Takes a frame from `from` (stamped by the relay). Returns frames to send back and complete messages. Frames
+    /// from devices outside the chain are dropped before any crypto.
+    pub fn receive(&mut self, members: &Members, from: &str, f: &[u8]) -> (Vec<Out>, Vec<Incoming>) {
         let (mut out, mut done) = (vec![], vec![]);
         let Some(remote) = members.get(from).and_then(|dh| unb64(dh)) else { return (out, done) };
         if f.len() < 9 {
@@ -132,6 +148,10 @@ impl Peers {
         let mut buf = vec![0u8; MAX_NOISE];
         match kind {
             HANDSHAKE => {
+                // The session id travels in the clear: one equal to the session we started is not the peer's.
+                if self.mine.get(from) == Some(&sid) {
+                    return (out, done);
+                }
                 // A new session from the peer (a repeat of an old first message just makes an orphan reply).
                 let p = prologue(from, &self.me);
                 let Ok(mut hs) = builder(self.dh_private.as_ref(), &remote, &p).and_then(|b| b.build_responder()) else { return (out, done) };
@@ -146,11 +166,19 @@ impl Peers {
                 out.push((from.to_string(), frame(REPLY, &sid, &buf[..n])));
             }
             REPLY => {
+                if self.mine.get(from) != Some(&sid) {
+                    return (out, done);
+                }
                 let Some(s) = self.sessions.remove(&key) else { return (out, done) };
                 let State::Initiating(mut hs, queue) = s.state else {
                     self.sessions.insert(key, s);
                     return (out, done);
                 };
+                // Too late: what waited on it is dropped (the caller has given up), and so is the session.
+                if s.started.elapsed() >= HANDSHAKE_TTL {
+                    self.mine.remove(from);
+                    return (out, done);
+                }
                 if hs.read_message(body, &mut buf).is_err() {
                     return (out, done);
                 }
@@ -167,11 +195,12 @@ impl Peers {
                 };
                 let State::Ready(ts) = &mut s.state else { return (out, done) };
                 let ok = ts.read_message(body, &mut buf).ok().filter(|&n| n >= 1).map(|n| (buf[0], buf[1..n].to_vec()));
+                let mine = self.mine.get(from) == Some(&sid);
                 match ok {
                     Some((more, chunk)) if s.partial.len() + chunk.len() <= MAX_MESSAGE => {
                         s.partial.extend_from_slice(&chunk);
                         if more == 0 {
-                            done.push((sid, std::mem::take(&mut s.partial)));
+                            done.push(Incoming { sid, mine, message: std::mem::take(&mut s.partial) });
                         }
                     }
                     // Undecryptable (replayed, reordered, forged) or oversized: the session is over.

@@ -16,6 +16,7 @@ const PATH_MAX: usize = 120;
 const ALLOWED: &[(&str, &str)] = &[
     ("GET", "sessions"),
     ("GET", "accounts"),
+    ("GET", "machine"),
     ("PATCH", "session"),
     ("POST", "order"),
     ("POST", "resume"),

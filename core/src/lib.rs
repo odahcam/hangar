@@ -95,6 +95,8 @@ pub struct Hangar {
     /// Set (and notified) to start the background run now instead of at its next scheduled time.
     wake: (Mutex<bool>, Condvar),
     platform: &'static dyn platform::Platform,
+    /// Remote control over the internet, once the app starts it (start_cloud); the test server leaves it off.
+    cloud: std::sync::OnceLock<Arc<cloud::service::Cloud>>,
 }
 
 /// Done detection runs, as ms timestamps: the last one's start and end, and when the background thread runs next.
@@ -130,7 +132,7 @@ impl Hangar {
         std::fs::create_dir_all(&backup_dir).map_err(|e| format!("{}: {e}", backup_dir.display()))?;
         let db = db::open(&cfg.data_dir.join("state.db")).map_err(|e| e.to_string())?;
         let h = Arc::new(Hangar { claude_dirs: cfg.claude_dirs, discover: cfg.discover, backup_dir, timing: (cfg.classify_start, cfg.classify_every), db: Mutex::new(db), classifying: AtomicBool::new(false),
-            runs: Mutex::default(), wake: (Mutex::new(false), Condvar::new()), platform: platform::current() });
+            runs: Mutex::default(), wake: (Mutex::new(false), Condvar::new()), platform: platform::current(), cloud: std::sync::OnceLock::new() });
         {
             let db = h.db();
             h.scan_all(&db).and_then(|_| h.seed_done(&db)).and_then(|_| h.scan_all(&db)).map_err(|e| e.to_string())?;
@@ -162,6 +164,41 @@ impl Hangar {
                 wait = every;
             }
         });
+    }
+
+    /// Starts remote control: the device identity (created on first use) and the link to the relay.
+    pub fn start_cloud(self: &Arc<Self>) -> Result<(), String> {
+        if self.cloud.get().is_some() {
+            return Ok(());
+        }
+        let c = cloud::service::Cloud::start(Arc::downgrade(self))?;
+        if let Err(c) = self.cloud.set(c) {
+            c.stop();
+        }
+        Ok(())
+    }
+
+    pub fn cloud(&self) -> Option<Arc<cloud::service::Cloud>> {
+        self.cloud.get().cloned()
+    }
+
+    /// POST /api/cloud/login → {url} to open in the browser; /callback {url} with the deep link; /logout;
+    /// /call {device, method, path, body} → the other machine's reply. Local only: handle_remote never reaches these.
+    fn cloud_route(&self, method: &str, what: &str, body: &Value) -> ApiResult {
+        let c = self.cloud().ok_or_else(|| ApiError(409, "cloud_off".into()))?;
+        let auth = |r: Result<(), cloud::oauth::AuthError>| r.map(|_| json!({ "ok": true })).map_err(|e| ApiError(400, e.to_string()));
+        match (method, what) {
+            ("POST", "login") => Ok(json!({ "url": c.begin_login() })),
+            ("POST", "callback") => auth(c.complete_login(body["url"].as_str().unwrap_or(""))),
+            ("POST", "logout") => auth(c.sign_out()),
+            ("POST", "call") => {
+                let (Some(device), Some(m), Some(p)) = (body["device"].as_str(), body["method"].as_str(), body["path"].as_str()) else { return Err(ApiError(400, "call".into())) };
+                let b = if body["body"].is_null() { String::new() } else { body["body"].to_string() };
+                let r = c.call(device, m, p, &b);
+                if r.status < 400 { Ok(r.body) } else { Err(ApiError(r.status, r.body["error"].as_str().unwrap_or("remote_error").into())) }
+            }
+            _ => Err(ApiError(404, "not found".into())),
+        }
     }
 
     fn run_now(&self) -> Value {
@@ -290,6 +327,9 @@ impl Hangar {
             ("POST", "accounts") => return self.add_account(&parse()?),
             ("PATCH", "account") => return self.update_account(&parse()?),
             ("DELETE", "account") => return self.remove_account(&parse()?),
+            ("GET", "machine") => return Ok(json!({ "name": sysinfo::System::host_name(), "os": std::env::consts::OS })),
+            ("GET", "cloud") if id.is_empty() => return Ok(self.cloud().map_or_else(|| json!({ "link": { "state": "off" } }), |c| c.status())),
+            (_, "cloud") => return self.cloud_route(method, id, &parse()?),
             ("GET", "remote") => return self.remote_status(),
             ("PATCH", "remote") => return self.set_remote(&parse()?),
             ("POST", "order") => {

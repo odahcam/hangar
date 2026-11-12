@@ -121,13 +121,14 @@ impl From<Answer> for AuthError {
     }
 }
 
-/// Whether a transport error proves the request never left this machine.
+/// Whether a transport error proves the request never left this machine: only failures to resolve or connect. A TLS
+/// or I/O error can also come after the body went out, so it counts as "may have" (which costs one status query).
 fn never_sent(e: &ureq::Error) -> bool {
     use std::io::ErrorKind::*;
     match e {
-        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed | ureq::Error::Tls(_) | ureq::Error::Rustls(_) | ureq::Error::BadUri(_) | ureq::Error::RequireHttpsOnly(_) | ureq::Error::Http(_) => true,
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed | ureq::Error::BadUri(_) | ureq::Error::RequireHttpsOnly(_) | ureq::Error::Http(_) => true,
         ureq::Error::Timeout(t) => matches!(t, ureq::Timeout::Resolve | ureq::Timeout::Connect),
-        ureq::Error::Io(io) => matches!(io.kind(), ConnectionRefused | AddrNotAvailable | NetworkUnreachable | HostUnreachable | NotConnected),
+        ureq::Error::Io(io) => matches!(io.kind(), ConnectionRefused | AddrNotAvailable | NetworkUnreachable | HostUnreachable),
         _ => false,
     }
 }
@@ -260,9 +261,12 @@ impl Auth {
         // still set). Inside the reuse grace the server answers a repeat with the same result; past it, a repeat of a
         // retired token revokes every machine of the account, so the service is asked what became of the token.
         let pending = stored.refresh_sent_at != 0;
+        // The mark keeps the first attempt's time while the outcome is unknown: retries mustn't slide it past the
+        // server's grace. Only a confirmed-current token starts a new mark.
+        let mut mark = if pending { stored.refresh_sent_at } else { now_ms() };
         if pending && now_ms() - stored.refresh_sent_at > REUSE_GRACE_MS {
             match self.refresh_status(&refresh) {
-                Some(Status::Current) => {}
+                Some(Status::Current) => mark = now_ms(),
                 Some(Status::Gone) => {
                     self.forget()?;
                     return Err(AuthError::SignedOut);
@@ -273,7 +277,7 @@ impl Auth {
         }
         secrets::update(|s| {
             let mut s = s.ok_or("no device identity")?;
-            s.refresh_sent_at = now_ms();
+            s.refresh_sent_at = mark;
             Ok((Some(s), ()))
         })
         .map_err(AuthError::Unavailable)?;

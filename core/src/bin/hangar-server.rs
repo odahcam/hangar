@@ -26,6 +26,12 @@ fn main() {
         std::process::exit(1);
     });
     hangar.spawn_background();
+    // The cloud suites point it at a local relay and identity stand-in (see cloud/link.rs, oauth.rs).
+    if cfg!(debug_assertions) && std::env::var_os("HANGAR_TEST_CLOUD").is_some() {
+        if let Err(e) = hangar.start_cloud() {
+            eprintln!("cloud: {e}");
+        }
+    }
 
     let server = Arc::new(Server::http(("127.0.0.1", port)).unwrap_or_else(|e| {
         eprintln!("hangar: {e}");

@@ -36,7 +36,7 @@ fn pump(a: &mut Node, b: &mut Node, m: &Members, frames: Vec<(String, Out)>) -> 
         let n = if to == a.id.device() { &mut *a } else { &mut *b };
         let (out, done) = n.peers.receive(m, &from, &f);
         let me = n.id.device();
-        got.extend(done.into_iter().map(|(sid, p)| (me.clone(), sid, p)));
+        got.extend(done.into_iter().map(|i| (me.clone(), i.sid, i.message)));
         frames.extend(out.into_iter().map(|o| (me.clone(), o)));
     }
     got
@@ -95,4 +95,40 @@ fn frames_stamped_with_another_device_or_from_outside_the_chain_go_nowhere() {
     assert!(replies.is_empty() && done.is_empty());
     // And a can't open a session to a device outside the chain.
     assert_eq!(a.peers.send(&members(&[&a]), &db_, b"x").unwrap_err(), "not_member");
+}
+
+#[test]
+fn a_handshake_reusing_my_session_id_is_not_taken_as_the_peers() {
+    let (mut a, mut b) = (node(), node());
+    let m = members(&[&a, &b]);
+    let (da, db_) = (a.id.device(), b.id.device());
+    let out = a.peers.send(&m, &db_, b"hi").unwrap();
+    // b starts its own session to a, and the relay rewrites b's session id to a's.
+    let mut theirs = b.peers.send(&m, &da, b"yo").unwrap();
+    theirs[0].1[1..9].copy_from_slice(&out[0].1[1..9]);
+    let (replies, _) = a.peers.receive(&m, &db_, &theirs[0].1);
+    assert!(replies.is_empty());
+    // a's own session still completes.
+    let got = pump(&mut a, &mut b, &m, out.into_iter().map(|o| (da.clone(), o)).collect());
+    assert_eq!(got[0].2, b"hi");
+}
+
+#[test]
+fn messages_say_which_session_they_came_on() {
+    let (mut a, mut b) = (node(), node());
+    let m = members(&[&a, &b]);
+    let (da, db_) = (a.id.device(), b.id.device());
+    let mut frames: std::collections::VecDeque<(String, Out)> = a.peers.send(&m, &db_, b"call").unwrap().into_iter().map(|o| (da.clone(), o)).collect();
+    let mut seen = vec![];
+    while let Some((from, (to, f))) = frames.pop_front() {
+        let (out, done) = if to == da { a.peers.receive(&m, &from, &f) } else { b.peers.receive(&m, &from, &f) };
+        for i in done {
+            seen.push((to.clone(), i.mine, i.message.clone()));
+            if to == db_ {
+                frames.extend(b.peers.reply(&da, &i.sid, b"answer").unwrap().into_iter().map(|o| (db_.clone(), o)));
+            }
+        }
+        frames.extend(out.into_iter().map(|o| (to.clone(), o)));
+    }
+    assert_eq!(seen, vec![(db_.clone(), false, b"call".to_vec()), (da.clone(), true, b"answer".to_vec())]);
 }
