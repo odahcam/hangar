@@ -6,14 +6,22 @@ edition.workspace = true
 license-file.workspace = true
 
 [dependencies]
+base64 = "=0.23.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ed25519-dalek = "=3.0.0"
+getrandom = "=0.4.3"
+keyring = "=4.2.0"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
 # preserve_order: an account's settings.json is rewritten with its keys where the user left them.
 serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "=0.11.1"
+snow = "=0.10.0"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tiny_http = "0.12"
 wait-timeout = "0.2"
+zeroize = { version = "=1.9.1", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
