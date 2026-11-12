@@ -12,10 +12,9 @@
 		"ISSUER": "https://auth.odahcam.com",
 		"AUDIENCE": "https://hangar.odahcam.com",
 		"CLIENT_ID": "hangar",
-		"JWKS": "https://auth.odahcam.com/api/auth/jwks",
-		// Empty serves no one: the account ids go here at deploy (see auth.ts).
-		"ALLOWED_SUBS": ""
+		"JWKS": "https://auth.odahcam.com/api/auth/jwks"
 	},
+	// Secret (wrangler secret put): ALLOWED_SUBS, the account ids served (see auth.ts). Unset serves no one.
 	"durable_objects": { "bindings": [{ "name": "ACCOUNT", "class_name": "Account" }] },
 	// SQLite-backed: the only Durable Objects the Workers Free plan runs.
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Account"] }]

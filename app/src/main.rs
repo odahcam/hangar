@@ -2,6 +2,7 @@
 // in-process through the `api` command, the same router hangar-server exposes over HTTP to the tests.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use hangar_core::cloud::oauth::AuthError;
 use hangar_core::{Config, Hangar};
 use std::sync::Arc;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -20,6 +21,10 @@ fn open_link(app: &AppHandle, url: &str) {
     let (app, url) = (app.clone(), url.to_string());
     std::thread::spawn(move || {
         let r = cloud.complete_login(&url);
+        // A link that isn't for the sign-in under way (any web page can open one) is dropped without a sound.
+        if matches!(&r, Err(AuthError::Invalid(e)) if ["state", "iss", "query", "callback"].contains(&e.as_str())) {
+            return;
+        }
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
             let _ = w.set_focus();

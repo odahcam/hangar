@@ -276,9 +276,12 @@ function showView(v) {
 let cloud = null, remote = null, machine = "", machineNames = {};
 try { machine = localStorage.getItem("machine") || ""; } catch {}
 const REMOTE_OK = /^(GET \/api\/(sessions|accounts|machine)$|PATCH \/api\/session\/|POST \/api\/(order$|resume\/|close\/|dismiss-suggestion\/))/;
+// With another machine shown, anything outside that list is refused here rather than run on this machine: the
+// screen shows the other machine, and the same ~/.claude path exists on both.
 async function api(method, path, body) {
-  if (machine && REMOTE_OK.test(`${method} ${path}`)) return apiLocal("POST", "/api/cloud/call", { device: machine, method, path, body: body ?? null });
-  return apiLocal(method, path, body);
+  if (!machine) return apiLocal(method, path, body);
+  if (REMOTE_OK.test(`${method} ${path}`)) return apiLocal("POST", "/api/cloud/call", { device: machine, method, path, body: body ?? null });
+  throw new Error("remote_forbidden");
 }
 
 // The desktop app calls the core in-process (Tauri invoke); in a browser (tests, `npm start`) the same API is HTTP.
@@ -392,7 +395,10 @@ function render() {
   $("#settingsBtn").setAttribute("aria-pressed", set);
   if (ins || set) $("#empty").hidden = true;
   if (ins) return loadInsights();
-  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), accountsPanel(), classifierSettings(), cloudPanel(), remotePanel());
+  // Settings are this machine's: with another one shown, its accounts aren't listed here as if they could be edited.
+  const local = machine ? [panel(t("pAccounts"), "", [el("div", { class: "meta", text: t("settingsLocalOnly", { name: machineName(machine) }) }),
+    el("div", {}, [btn(t("showThisMachine"), "", () => { $("#machine").value = ""; $("#machine").onchange({ target: $("#machine") }); })])])] : [accountsPanel(), classifierSettings()];
+  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), ...local, cloudPanel(), remotePanel());
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
   const acct = multi() ? $("#acct").value : "";
   const byPrompts = $("#sort").value === "prompt";
@@ -693,6 +699,8 @@ function rankCell(s, rank, reorder, li) {
 // Copies the session into another account, the source kept unless "remove" is checked. An open session can't go:
 // it keeps writing where it started.
 function transferControl(s) {
+  // Moving between accounts is the machine's own business: not offered from another machine.
+  if (machine) return null;
   const targets = shown().filter((a) => a.dir !== s.account);
   const sel = el("select", { "aria-label": t("transferTo") }, targets.map((a) => el("option", { value: a.dir, text: a.name })));
   const rm = el("input", { type: "checkbox" });
@@ -1019,7 +1027,7 @@ async function loadInsights() {
 
 async function load() {
   const was = machine;
-  try { [items, accounts, classifier] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts"), api("GET", "/api/classifier"), loadCloud()]); } catch (e) {
+  try { [items, accounts, classifier] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts"), machine ? null : api("GET", "/api/classifier"), loadCloud()]); } catch (e) {
     $("#counts").textContent = machine ? t("machineDown", { name: machineName(machine), msg: failed(e) }) : t("serverDown", { msg: e.message });
     return;
   }
