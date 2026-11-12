@@ -191,6 +191,8 @@ impl Hangar {
             ("POST", "login") => Ok(json!({ "url": c.begin_login() })),
             ("POST", "callback") => auth(c.complete_login(body["url"].as_str().unwrap_or(""))),
             ("POST", "logout") => auth(c.sign_out()),
+            ("POST", "offer") => c.offer().map(|code| json!({ "code": code })).map_err(|e| ApiError(409, e)),
+            ("POST", "join") => c.join(body["code"].as_str().unwrap_or("")).map(|_| json!({ "ok": true })).map_err(|e| ApiError(409, e)),
             ("POST", "call") => {
                 let (Some(device), Some(m), Some(p)) = (body["device"].as_str(), body["method"].as_str(), body["path"].as_str()) else { return Err(ApiError(400, "call".into())) };
                 let b = if body["body"].is_null() { String::new() } else { body["body"].to_string() };

@@ -4,6 +4,7 @@ pub mod chain;
 pub mod identity;
 pub mod link;
 pub mod oauth;
+pub mod pairing;
 pub mod peer;
 pub mod secrets;
 pub mod service;
@@ -21,6 +22,8 @@ pub(crate) fn unb64(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod oauth_tests;
+#[cfg(test)]
+mod pairing_tests;
 #[cfg(test)]
 mod peer_tests;
 #[cfg(test)]
