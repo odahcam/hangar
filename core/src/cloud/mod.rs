@@ -3,6 +3,7 @@
 pub mod chain;
 pub mod identity;
 pub mod oauth;
+pub mod peer;
 pub mod secrets;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -18,5 +19,7 @@ pub(crate) fn unb64(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod oauth_tests;
+#[cfg(test)]
+mod peer_tests;
 #[cfg(test)]
 mod tests;

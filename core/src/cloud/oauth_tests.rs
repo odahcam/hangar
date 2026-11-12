@@ -14,6 +14,9 @@ struct Issuer {
     requests: Arc<Mutex<Vec<HashMap<String, String>>>>,
     /// Status and body for the next token requests; empty = a fresh token pair.
     script: Arc<Mutex<Vec<(u16, String)>>>,
+    /// What /api/oauth2/refresh-status answers, and the tokens it was asked about.
+    status: Arc<Mutex<(u16, String)>>,
+    status_asked: Arc<Mutex<Vec<String>>>,
 }
 
 fn jwt(sub: &str, exp: i64) -> String {
@@ -25,13 +28,21 @@ fn issuer() -> Issuer {
     let url = format!("http://127.0.0.1:{}", server.server_addr().to_ip().unwrap().port());
     let requests = Arc::new(Mutex::new(Vec::new()));
     let script: Arc<Mutex<Vec<(u16, String)>>> = Arc::new(Mutex::new(Vec::new()));
-    let (r, s) = (Arc::clone(&requests), Arc::clone(&script));
+    let status = Arc::new(Mutex::new((404, String::new())));
+    let status_asked = Arc::new(Mutex::new(Vec::new()));
+    let (r, s, st, sa) = (Arc::clone(&requests), Arc::clone(&script), Arc::clone(&status), Arc::clone(&status_asked));
     std::thread::spawn(move || {
         let mut n = 0;
         for mut req in server.incoming_requests() {
             let mut body = String::new();
             req.as_reader().read_to_string(&mut body).unwrap();
             let form: HashMap<String, String> = body.split('&').filter_map(|p| p.split_once('=')).map(|(k, v)| (k.to_string(), urlish(v))).collect();
+            if req.url() == "/api/oauth2/refresh-status" {
+                sa.lock().unwrap().push(form["refresh_token"].clone());
+                let (code, body) = st.lock().unwrap().clone();
+                let _ = req.respond(tiny_http::Response::from_string(body).with_status_code(code));
+                continue;
+            }
             r.lock().unwrap().push(form);
             // Slow enough that concurrent refreshes would overlap if they weren't single-flight.
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -43,7 +54,7 @@ fn issuer() -> Issuer {
             let _ = req.respond(tiny_http::Response::from_string(body).with_status_code(status));
         }
     });
-    Issuer { url, requests, script }
+    Issuer { url, requests, script, status, status_asked }
 }
 
 fn urlish(v: &str) -> String {
@@ -150,11 +161,43 @@ fn sign_in_and_refresh() {
     assert!(auth.access().is_ok(), "retried inside the grace");
     assert_eq!(iss.requests.lock().unwrap()[before]["refresh_token"], "refresh-x");
     assert_eq!(secrets::load().unwrap().unwrap().refresh_sent_at, 0);
-    set_refresh("refresh-y", chrono::Utc::now().timestamp_millis() - 30_000);
-    let auth = Auth::new();
-    let before = iss.requests.lock().unwrap().len();
-    assert_eq!(auth.access().unwrap_err(), AuthError::SignedOut);
-    assert_eq!(iss.requests.lock().unwrap().len(), before, "the possibly retired token is not sent");
+    // Past the grace the service is asked what became of the token, and the token is sent again only if it's current.
+    let long_ago = || chrono::Utc::now().timestamp_millis() - 30_000;
+    let sent = || iss.requests.lock().unwrap().len();
+    set_refresh("refresh-y", long_ago());
+    let before = sent();
+    // Can't ask (no endpoint, 404): neither sent nor signed out.
+    assert_eq!(Auth::new().access().unwrap_err(), AuthError::Unavailable("refresh_status".into()));
+    assert_eq!((sent(), secrets::load().unwrap().unwrap().refresh.as_str()), (before, "refresh-y"));
+    *iss.status.lock().unwrap() = (200, r#"{"status":"current"}"#.into());
+    assert!(Auth::new().access().is_ok());
+    assert_eq!(iss.requests.lock().unwrap()[before]["refresh_token"], "refresh-y");
+    assert_eq!(iss.status_asked.lock().unwrap().last().unwrap(), "refresh-y");
+    set_refresh("refresh-z", long_ago());
+    *iss.status.lock().unwrap() = (200, r#"{"status":"rotated"}"#.into());
+    let before = sent();
+    assert_eq!(Auth::new().access().unwrap_err(), AuthError::SignedOut);
+    assert_eq!(sent(), before, "a rotated token is never sent again");
     assert_eq!(secrets::load().unwrap().unwrap().refresh, "");
+
+    // A 5xx after a pending mark keeps the mark: the rotation may have happened before the error.
+    set_refresh("refresh-w", long_ago() + 20_000);
+    iss.script.lock().unwrap().push((503, "{}".into()));
+    let marked = secrets::load().unwrap().unwrap().refresh_sent_at;
+    assert!(Auth::new().access().is_err());
+    assert!(secrets::load().unwrap().unwrap().refresh_sent_at >= marked);
+
+    // A request that never left this machine (nothing listening) leaves no mark behind.
+    set_refresh("refresh-v", 0);
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_url = format!("http://127.0.0.1:{}", dead.local_addr().unwrap().port());
+    drop(dead);
+    // SAFETY: as above; restored right after.
+    unsafe { std::env::set_var("HANGAR_AUTH_ISSUER", &dead_url) };
+    let offline = Auth::new();
+    unsafe { std::env::set_var("HANGAR_AUTH_ISSUER", &iss.url) };
+    assert!(matches!(offline.access(), Err(AuthError::Unavailable(_))));
+    let s = secrets::load().unwrap().unwrap();
+    assert_eq!((s.refresh.as_str(), s.refresh_sent_at), ("refresh-v", 0));
     let _ = std::fs::remove_dir_all(&dir);
 }
