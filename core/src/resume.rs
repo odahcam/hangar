@@ -9,20 +9,19 @@ use std::process::Command;
 const HELPER: &str = if cfg!(windows) { "hangar-resume.exe" } else { "hangar-resume" };
 
 /// The helper beside the running executable: Hangar.app/Contents/MacOS, the install folder on Windows, target/<profile>
-/// for hangar-server.
-pub fn helper() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_default();
-    exe.parent().map(|d| d.join(HELPER)).unwrap_or_else(|| PathBuf::from(HELPER))
+/// for hangar-server. None when that can't be told: a bare name would be looked up by the tab, in the session's folder.
+pub fn helper() -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.join(HELPER))
 }
 
 /// The command line a tab runs, in the session's folder, to resume session `id` under the account in `config`
 /// (None: the default account).
-pub fn argv(id: &str, config: Option<&Path>) -> Vec<String> {
-    let mut v = vec![helper().to_string_lossy().into_owned(), id.to_string()];
+pub fn argv(id: &str, config: Option<&Path>) -> Option<Vec<String>> {
+    let mut v = vec![helper()?.to_string_lossy().into_owned(), id.to_string()];
     if let Some(d) = config {
         v.extend(["--config".to_string(), d.to_string_lossy().into_owned()]);
     }
-    v
+    Some(v)
 }
 
 /// Session ids are UUIDs; anything else isn't passed to claude.
@@ -32,8 +31,15 @@ pub fn valid_id(id: &str) -> bool {
 
 /// For the helper: `claude --resume <id>` under the account in `config` (None: the default account, so a
 /// CLAUDE_CONFIG_DIR the tab carries goes), without the variables that would make it a Claude Code session's child.
-pub fn claude_command(id: &str, config: Option<&str>) -> Command {
-    let mut c = command(&crate::classify::claude_path().unwrap_or_else(|| "claude".into()));
+/// claude is looked up away from the session's folder (see classify::find_claude), and one found inside it anyway
+/// (a PATH that lists "." or the folder) is refused: the repository being resumed doesn't get to pick the binary.
+pub fn claude_command(id: &str, config: Option<&str>) -> Result<Command, String> {
+    let bin = crate::classify::claude_path().ok_or("claude not found")?;
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    if Path::new(&bin).starts_with(&cwd) {
+        return Err(format!("refusing {bin}, inside the session's folder"));
+    }
+    let mut c = command(&bin);
     for k in SESSION_ENV {
         c.env_remove(k);
     }
@@ -42,5 +48,5 @@ pub fn claude_command(id: &str, config: Option<&str>) -> Command {
         None => c.env_remove("CLAUDE_CONFIG_DIR"),
     };
     c.args(["--resume", id]);
-    c
+    Ok(c)
 }

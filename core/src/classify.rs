@@ -57,8 +57,14 @@ fn find_claude() -> Option<String> {
         return Some(found.to_string_lossy().into());
     }
     let (cmd, args) = p.which_claude();
-    let out = run_disclaimed(command(&cmd).args(&args), None, Duration::from_secs(10));
-    out.out.lines().next().map(str::trim).filter(|s| out.ok && !s.is_empty()).map(String::from)
+    // Asked from the home folder, not wherever this runs (the resume helper runs in the session's repository).
+    let out = run_disclaimed(command(&cmd).args(&args).current_dir(&home), None, Duration::from_secs(10));
+    if !out.ok {
+        return None;
+    }
+    // Only an absolute path; on Windows one that runs (npm also installs an extensionless sh shim, listed first).
+    let runs = |s: &str| !cfg!(windows) || [".exe", ".cmd", ".bat"].iter().any(|e| s.to_ascii_lowercase().ends_with(e));
+    out.out.lines().map(str::trim).find(|s| std::path::Path::new(s).is_absolute() && runs(s)).map(String::from)
 }
 
 /// Where claude is, looked up afresh (the helper runs once per resume).

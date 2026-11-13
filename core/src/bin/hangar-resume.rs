@@ -14,7 +14,7 @@ fn main() {
         }
     }
     let id = id.filter(|i| resume::valid_id(i)).unwrap_or_else(|| usage());
-    let mut c = resume::claude_command(&id, config.as_deref());
+    let mut c = resume::claude_command(&id, config.as_deref()).unwrap_or_else(|e| fail(&e));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

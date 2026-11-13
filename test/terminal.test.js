@@ -217,9 +217,14 @@ test("the resume helper starts claude --resume under the given account, as no se
   const id = "0b7e4a2c-1d2f-4a6b-9c3d-5e6f7a8b9c0d";
   const env = { ...process.env, CLAUDE_BIN: path.join(__dirname, "bin", "claude.js"), FAKE_LOG: w.log, FAKE_VERDICTS: w.verdicts,
     CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "parent", CLAUDE_CONFIG_DIR: "/somewhere/else" };
-  const run = (args) => spawnSync(RESUME, args, { env, input: "", encoding: "utf8" });
+  // A tab runs it in the session's folder; here, one away from the fake claude.
+  const run = (args, cwd = w.root) => spawnSync(RESUME, args, { env, cwd, input: "", encoding: "utf8" });
   run([id, "--config", "/accounts/work"]);
   run([id]);
+  // A claude inside the session's folder is never the one run: the repository doesn't pick the binary.
+  const inside = run([id], path.join(__dirname, ".."));
+  assert.equal(inside.status, 2, inside.stderr);
+  assert.match(inside.stderr, /inside the session's folder/);
   const [withAccount, plain] = calls(w, "claude");
   assert.deepEqual(withAccount.args, ["--resume", id]);
   assert.equal(withAccount.config, "/accounts/work");

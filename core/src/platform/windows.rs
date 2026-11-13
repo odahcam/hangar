@@ -26,8 +26,10 @@ impl Platform for Windows {
         vec![home.join(".local/bin/claude.exe"), home.join(".claude/local/claude.exe")]
     }
 
+    // $PATH: searches only the PATH; a bare name would look in the current folder first (for the resume helper, the
+    // session's own repository).
     fn which_claude(&self) -> (String, Vec<String>) {
-        ("where.exe".into(), vec!["claude".into()])
+        ("where.exe".into(), vec!["$PATH:claude".into()])
     }
 
     fn tabs(&self) -> HashMap<String, Tab> {

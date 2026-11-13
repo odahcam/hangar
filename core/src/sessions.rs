@@ -242,7 +242,8 @@ impl Hangar {
         if !crate::resume::valid_id(id) {
             return Err(ApiError(409, "unsupported_id".into()));
         }
-        self.platform.open(&cwd, &crate::resume::argv(id, config)).map_err(|e| ApiError(500, e))?;
+        let argv = crate::resume::argv(id, config).ok_or_else(|| ApiError(500, "no_resume_helper".into()))?;
+        self.platform.open(&cwd, &argv).map_err(|e| ApiError(500, e))?;
         Ok(json!({ "opened": true }))
     }
 
