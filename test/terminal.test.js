@@ -205,7 +205,8 @@ test("on Windows resuming a closed session opens a Windows Terminal tab running 
 
 // No shell parses the account folder any more: quotes of any kind reach the helper as they are.
 test("on Windows an account folder with quotes reaches the helper as one argument", { skip: !WIN32 }, async () => {
-  const dir = addAccount(w, "claude-it's \u2018a\u2019 \"b\"");
+  // (A double quote can't be in a Windows file name.)
+  const dir = addAccount(w, "claude-it's \u2018a\u2019 & %b%");
   const s = addSession(w, { claude: dir, cwd: String.raw`C:\work\q`, turns: [{ user: "a" }] });
   srv = await startServer(w);
   assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { opened: true });
