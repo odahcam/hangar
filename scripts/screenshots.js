@@ -40,7 +40,7 @@ async function main() {
   let srv, browser;
   try {
     const personal = addAccount(w, "personal");
-    const P = (p) => `/Users/dev/code/${p}`;
+    const P = (p) => `/Users/demo/code/${p}`;
 
     const s = {
       rate: session(w, { cwd: P("acme/api"), branch: "feat/rate-limit", title: "Rate limiter for public API", days: [12, 9, 6, 3, 1, 0], per: 6, tokens: 1.4, endAgo: 30 * MIN,
