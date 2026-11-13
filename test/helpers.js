@@ -9,6 +9,8 @@ const ROOT = path.join(__dirname, "..");
 const BIN = path.join(__dirname, "bin");
 // The core over HTTP (core/src/bin/hangar-server.rs); `npm test` builds it first. HANGAR_SERVER points at another build.
 const SERVER = process.env.HANGAR_SERVER || path.join(ROOT, "target/debug", "hangar-server" + (process.platform === "win32" ? ".exe" : ""));
+// The resume helper a terminal tab runs (core/src/bin/hangar-resume.rs): the server finds it beside itself.
+const RESUME = path.join(path.dirname(SERVER), "hangar-resume" + (process.platform === "win32" ? ".exe" : ""));
 const HOUR = 36e5, DAY = 864e5;
 // Terminal features differ per OS (see core/src/platform); tests of one OS's terminal skip on the others.
 const DARWIN = process.platform === "darwin", WIN32 = process.platform === "win32";
@@ -105,10 +107,10 @@ function calls(w, bin) {
   return fs.readFileSync(w.log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((c) => !bin || c.bin === bin);
 }
 
-// Whether this OS's terminal was asked to run `claude --resume <id>`.
+// Whether this OS's terminal was asked to run the resume helper for session `id`.
 function resumed(w, id) {
-  return calls(w).some((c) => c.bin === "osascript" ? c.script.includes(`claude --resume ${id}`)
-    : c.bin === "wt" && c.args.join(" ").endsWith(`claude --resume ${id}`));
+  return calls(w).some((c) => c.bin === "osascript" ? c.script.includes("do script") && c.script.includes(`hangar-resume' '${id}'`)
+    : c.bin === "wt" && c.args.some((a) => /hangar-resume(\.exe)?$/.test(a)) && c.args.includes(id));
 }
 
 async function startServer(w, env = {}) {
@@ -211,4 +213,4 @@ async function waitFor(fn, { timeout = 10000, every = 100 } = {}) {
   }
 }
 
-module.exports = { stopApp, ROOT, BIN, HOUR, DAY, DARWIN, WIN32, resumed, ago, makeWorld, addAccount, addSession, appendTurns, addLive, setTabs, setVerdicts, calls, startServer, cleanup, waitFor };
+module.exports = { stopApp, ROOT, BIN, RESUME, HOUR, DAY, DARWIN, WIN32, resumed, ago, makeWorld, addAccount, addSession, appendTurns, addLive, setTabs, setVerdicts, calls, startServer, cleanup, waitFor };

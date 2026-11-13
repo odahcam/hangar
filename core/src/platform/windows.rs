@@ -2,7 +2,7 @@
 // idle-tab cleanup here. A running session is still brought forward: its console's window leads to the terminal
 // window that hosts it, and UI Automation selects the tab whose title is that console's title.
 use super::{Caps, Platform, Tab};
-use crate::proc::{command, run, run_with, SESSION_ENV, TERMINAL_ENV};
+use crate::proc::{command, run_with, TERMINAL_ENV};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -12,9 +12,6 @@ pub struct Windows;
 
 // Overridable so tests can stand in for Windows Terminal.
 static WT: LazyLock<String> = LazyLock::new(|| std::env::var("HANGAR_WT").unwrap_or_else(|_| "wt.exe".into()));
-// PowerShell 7 when it's installed (it's what Windows Terminal defaults to then), else Windows PowerShell.
-static POWERSHELL: LazyLock<String> =
-    LazyLock::new(|| if run("where.exe", &["pwsh.exe"], Duration::from_secs(5)).ok { "pwsh.exe" } else { "powershell.exe" }.into());
 
 impl Platform for Windows {
     fn caps(&self) -> Caps {
@@ -54,41 +51,30 @@ impl Platform for Windows {
     }
 
     // A new tab in the most recent Windows Terminal window; without Windows Terminal, a console window of its own.
-    // The tab runs PowerShell (7 when installed, else the one Windows ships), which stays once claude exits, as the
-    // shell does in a macOS Terminal tab. Whether the tab gets our environment or that of the window it lands in
-    // isn't ours to choose, so the account is set inside the tab. The path goes in a single-quoted string (see
-    // single_quoted); wt splits its command line on ";", so each one is escaped.
-    fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String> {
+    // The tab runs the helper's command line itself, no shell: no profile has it as its command, so Windows Terminal
+    // takes the user's default profile, whichever shell that is. wt splits its command line on ";", so each one is
+    // escaped. The tab closes when claude exits.
+    fn open(&self, cwd: &str, argv: &[String]) -> Result<(), String> {
         let dir = cwd.replace(';', "\\;");
-        // The window may itself have been started from a Claude Code session; see proc::SESSION_ENV.
-        let mut script: Vec<String> = SESSION_ENV.iter().map(|k| format!("Remove-Item Env:{k} -ErrorAction Ignore")).collect();
-        script.push(match config {
-            Some(d) => format!("$env:CLAUDE_CONFIG_DIR = '{}'", single_quoted(&d.to_string_lossy())),
-            None => "Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction Ignore".into(),
-        });
-        script.push(format!("claude --resume {id}"));
-        let script = script.join("; ").replace(';', "\\;");
+        let line: Vec<String> = argv.iter().map(|a| a.replace(';', "\\;")).collect();
         // The tab inherits wt's environment, ours: without the look of the terminal Hangar may have been started from.
         let mut wt = command(&WT);
         for k in TERMINAL_ENV {
             wt.env_remove(k);
         }
-        let args = ["-w", "0", "new-tab", "--startingDirectory", &dir, POWERSHELL.as_str(), "-NoLogo", "-NoExit", "-Command", &script];
-        let r = run_with(wt.args(args), None, Duration::from_secs(8));
+        wt.args(["-w", "0", "new-tab", "--startingDirectory", &dir]).args(&line);
+        let r = run_with(&mut wt, None, Duration::from_secs(8));
         if !r.missing {
             return Ok(());
         }
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_CONSOLE: u32 = 0x10;
-        let mut c = command("claude");
+        let (bin, args) = argv.split_first().ok_or("no command")?;
+        let mut c = command(bin);
         for k in TERMINAL_ENV {
             c.env_remove(k);
         }
-        match config {
-            Some(d) => c.env("CLAUDE_CONFIG_DIR", d),
-            None => c.env_remove("CLAUDE_CONFIG_DIR"),
-        };
-        c.args(["--resume", id]).current_dir(cwd).creation_flags(CREATE_NEW_CONSOLE).spawn().map(drop).map_err(|e| e.to_string())
+        c.args(args).current_dir(cwd).creation_flags(CREATE_NEW_CONSOLE).spawn().map(drop).map_err(|e| e.to_string())
     }
 
     fn exit_tab(&self, _: &str, _: bool) {}
@@ -171,12 +157,6 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     s
-}
-
-/// Content for a PowerShell single-quoted string. PowerShell takes the curly quotes (U+2018 to U+201B) for a quote
-/// too, so each of the five is doubled, as its own EscapeSingleQuotedStringContent does; nothing else is special.
-fn single_quoted(s: &str) -> String {
-    s.chars().flat_map(|c| if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') { vec![c, c] } else { vec![c] }).collect()
 }
 
 // The few Win32/NT calls needed, declared directly.

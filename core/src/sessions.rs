@@ -239,7 +239,10 @@ impl Hangar {
         if !Path::new(&cwd).has_root() || !typable(&cwd) || config.as_ref().is_some_and(|d| !typable(&d.to_string_lossy())) {
             return Err(ApiError(409, "unsupported_path".into()));
         }
-        self.platform.open(&cwd, id, config).map_err(|e| ApiError(500, e))?;
+        if !crate::resume::valid_id(id) {
+            return Err(ApiError(409, "unsupported_id".into()));
+        }
+        self.platform.open(&cwd, &crate::resume::argv(id, config)).map_err(|e| ApiError(500, e))?;
         Ok(json!({ "opened": true }))
     }
 

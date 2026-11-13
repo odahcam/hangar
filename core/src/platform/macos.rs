@@ -115,19 +115,16 @@ impl Platform for MacOs {
         osascript(&tab_script(tty, "set selected of t to true\nset index of w to 1\nactivate")).trim() == "ok"
     }
 
-    fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String> {
-        if !posix_typable(cwd) || config.is_some_and(|d| !posix_typable(&d.to_string_lossy())) {
+    fn open(&self, cwd: &str, argv: &[String]) -> Result<(), String> {
+        if !posix_typable(cwd) || argv.iter().any(|a| !posix_typable(a)) {
             return Err("unsupported_path".into());
         }
-        let env = match config {
-            Some(dir) => format!("CLAUDE_CONFIG_DIR={} ", sh_quote(&dir.to_string_lossy())),
-            None => "unset CLAUDE_CONFIG_DIR && ".into(),
-        };
-        // Terminal's shell may carry a Claude Code session's environment; see proc::SESSION_ENV.
         // Terminal learns a tab's directory (what a new tab inherits) from the OSC 7 the shell prints at each prompt, so
-        // the cd needs a prompt of its own before claude takes the tab. It repeats on the second line to keep the guard.
+        // the cd needs a prompt of its own before the helper takes the tab. It repeats on the second line to keep the
+        // guard. The shell stays once claude exits.
         let dir = sh_quote(cwd);
-        let cmd = format!("cd {dir}\ncd {dir} && unset {} && {env}claude --resume {id}", crate::proc::SESSION_ENV.join(" "));
+        let line: Vec<String> = argv.iter().map(|a| sh_quote(a)).collect();
+        let cmd = format!("cd {dir}\ncd {dir} && {}", line.join(" "));
         osascript(&format!("tell application \"Terminal\"\ndo script {}\nactivate\nend tell", as_string(&cmd)));
         Ok(())
     }

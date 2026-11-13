@@ -22,6 +22,15 @@ before(() => {
 });
 after(() => cleanup(w));
 
+// Every resumed session runs the helper (core/src/resume.rs), found beside the app's executable.
+test("the resume helper ships beside the app's executable and refuses anything but a session id", () => {
+  const helper = path.join(path.dirname(EXE), "hangar-resume" + (WIN32 ? ".exe" : ""));
+  assert.ok(fs.existsSync(helper), helper);
+  let status = 0;
+  try { execFileSync(helper, ["not-a-session"], { stdio: "pipe" }); } catch (e) { status = e.status; }
+  assert.equal(status, 2);
+});
+
 test("the macOS bundle has the executable, icon and Info.plist", { skip: !DARWIN }, () => {
   for (const p of ["Contents/MacOS/Hangar", "Contents/Resources/icon.icns", "Contents/Info.plist"]) {
     assert.ok(fs.existsSync(path.join(APP, p)), p);

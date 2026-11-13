@@ -61,6 +61,11 @@ fn find_claude() -> Option<String> {
     out.out.lines().next().map(str::trim).filter(|s| out.ok && !s.is_empty()).map(String::from)
 }
 
+/// Where claude is, looked up afresh (the helper runs once per resume).
+pub(crate) fn claude_path() -> Option<String> {
+    find_claude()
+}
+
 fn claude_bin() -> Option<&'static str> {
     static BIN: OnceLock<Option<String>> = OnceLock::new();
     BIN.get_or_init(find_claude).as_deref()

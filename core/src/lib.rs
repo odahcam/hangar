@@ -12,6 +12,7 @@ mod insights;
 pub mod platform;
 mod proc;
 mod remote;
+pub mod resume;
 mod scan;
 mod sessions;
 
