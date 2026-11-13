@@ -2,6 +2,7 @@ import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare
 import { importJWK, SignJWT } from "jose";
 import { beforeEach, describe, expect, it } from "vitest";
 import { b64url, canonical, digest, type Body, type Entry } from "../src/chain";
+import { addressKey } from "../src/index";
 import { ISSUER_PRIVATE } from "./keys";
 
 const ISSUER = "https://auth.odahcam.com";
@@ -11,12 +12,9 @@ const now = () => Math.floor(Date.now() / 1000);
 // Each test gets accounts of its own: Durable Object storage and sockets outlive a test.
 let SUB = "";
 let OTHER = "";
-// ...and an address of its own, as the connection rate limits count per address.
-let IP = "";
 beforeEach(() => {
 	SUB = `user-${crypto.randomUUID()}`;
 	OTHER = `user-${crypto.randomUUID()}`;
-	IP = `10.${[0, 0, 0].map(() => Math.floor(Math.random() * 256)).join(".")}`;
 });
 
 async function token(claims: Record<string, unknown> = {}, alg = "EdDSA"): Promise<string> {
@@ -87,8 +85,8 @@ class Conn {
 	}
 }
 
-async function upgrade(tok?: string, ip = IP): Promise<Response> {
-	const headers: Record<string, string> = { upgrade: "websocket", "cf-connecting-ip": ip };
+async function upgrade(tok?: string): Promise<Response> {
+	const headers: Record<string, string> = { upgrade: "websocket" };
 	if (tok) headers.authorization = `Bearer ${tok}`;
 	return SELF.fetch("https://hangar.odahcam.com/v1/connect", { headers });
 }
@@ -158,23 +156,36 @@ describe("upgrade", () => {
 		expect((await c.json("challenge")).nonce).toMatch(/^[\w-]{43}$/);
 	});
 
-	it("limits connection attempts per address, junk tokens included, and per account", async () => {
-		const codes = [];
-		for (let i = 0; i < 31; i++) codes.push((await upgrade("junk")).status);
-		expect(codes.slice(0, 30).every((c) => c === 401)).toBe(true);
-		const r = await upgrade(await token());
+	it("limits connection attempts per account and address, and per account", async () => {
+		const tok = await token();
+		const at = (ip: string) => SELF.fetch("https://hangar.odahcam.com/v1/connect", {
+			headers: { upgrade: "websocket", authorization: `Bearer ${tok}`, "cf-connecting-ip": ip },
+		});
+		for (let i = 0; i < 30; i++) expect((await at("203.0.113.7")).status).toBe(101);
+		const r = await at("203.0.113.7");
 		expect(r.status).toBe(429);
 		expect(r.headers.get("retry-after")).toBe("60");
-		// Another address still gets in; the account's own limit holds whatever the address.
-		const tok = await token({ sub: OTHER });
-		const fresh = () => `10.${[0, 0, 0].map(() => Math.floor(Math.random() * 256)).join(".")}`;
-		for (let i = 0; i < 30; i++) expect((await upgrade(tok, fresh())).status).toBe(101);
-		expect((await upgrade(tok, fresh())).status).toBe(429);
+		// One IPv6 /64 is one address, however the host varies.
+		for (let i = 0; i < 30; i++) expect((await at(`2001:db8:1:2::${i.toString(16)}`)).status).toBe(101);
+		expect((await at("2001:db8:1:2:ffff::1")).status).toBe(429);
+		// The account's machines elsewhere still get in, up to the account's own ceiling.
+		for (let i = 0; i < 60; i++) expect((await at(`198.51.100.${i}`)).status).toBe(101);
+		expect((await at("198.51.100.200")).status).toBe(429);
+		// Another account isn't held back by it.
+		expect((await upgrade(await token({ sub: OTHER }))).status).toBe(101);
+	});
+
+	it("counts an IPv6 address by its /64", () => {
+		expect(addressKey("203.0.113.7")).toBe("203.0.113.7");
+		expect(addressKey("2001:DB8:0001:0002:aaaa::1")).toBe("2001:db8:1:2::/64");
+		expect(addressKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
+		expect(addressKey("::1")).toBe("0:0:0:0::/64");
+		expect(addressKey("2001:db8:1:2:3:4:5:6")).toBe("2001:db8:1:2::/64");
 	});
 
 	it("never takes the account from the client", async () => {
 		const r = await SELF.fetch("https://hangar.odahcam.com/v1/connect", {
-			headers: { upgrade: "websocket", "cf-connecting-ip": IP, authorization: `Bearer ${await token()}`, "x-relay-sub": OTHER },
+			headers: { upgrade: "websocket", authorization: `Bearer ${await token()}`, "x-relay-sub": OTHER },
 		});
 		const c = new Conn(r.webSocket!);
 		const d = await device();
