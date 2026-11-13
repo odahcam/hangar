@@ -1,7 +1,7 @@
 // The UI showing another machine's sessions: the relay and that machine are stood in for at the HTTP boundary
 // (/api/cloud*), so this runs in the web target only; test/cloud.test.js covers the real path.
 const { test, expect } = require("@playwright/test");
-const { makeWorld, addSession, addLive, cleanup } = require("../test/helpers");
+const { DARWIN, makeWorld, addSession, addLive, cleanup } = require("../test/helpers");
 const { launch } = require("./target");
 
 let w, srv;
@@ -42,6 +42,9 @@ test("resuming a session of another machine says where it opens, and confirms it
   await expect(page.locator("#toast")).toHaveText("Opened on Studio");
   expect(calls).toContain(`POST /api/resume/${closed.id}`);
 
+  // A running session can be brought forward where its terminal is known; on Windows the stand-in process here
+  // has no console window, so the button isn't offered at all.
+  if (!DARWIN) return;
   await row("Checkout redesign").locator(".title").click();
   await expect(page.locator("#detail").getByRole("button", { name: "Bring forward on Studio" })).toBeVisible();
   await expect(page.locator("#detail").getByRole("button", { name: "Go to terminal" })).toHaveCount(0);
