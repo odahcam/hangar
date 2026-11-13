@@ -1,6 +1,9 @@
 // The landing page and its install scripts (cloud/public) download one pinned release and check its SHA-256.
-//   node scripts/release-pin.js [vX.Y.Z]   pins that release (default: the latest), from its published assets
-//   node scripts/release-pin.js --check    fails unless the pinned release is the latest one and its digests match
+//   node scripts/release-pin.js [vX.Y.Z] [--from DIR]   pins that release (default: the latest)
+//   node scripts/release-pin.js --check                 fails unless the pinned release is the latest one and its
+//                                                       digests match
+// With --from, the digests come from the files in DIR (the ones attached to the release) and the published assets
+// must be byte for byte the same; without it they come from what GitHub serves at pin time.
 // After pinning: commit, then `npx wrangler deploy` in cloud/.
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -14,16 +17,38 @@ const HTML = path.join(PUBLIC, "index.html");
 
 const assets = (v) => ({ mac: "Hangar.zip", win: `Hangar_${v}_x64-setup.exe` });
 
-async function latest() {
-  const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { "user-agent": "hangar-release-pin" } });
-  if (!r.ok) throw new Error(`latest release: HTTP ${r.status}`);
-  return (await r.json()).tag_name.replace(/^v/, "");
+// The version ends up in a shell assignment, a PowerShell string, HTML and a regex: digits and dots only, whoever
+// named the tag.
+function version(s) {
+  const v = String(s ?? "").replace(/^v/, "");
+  if (!/^\d+\.\d+\.\d+$/.test(v)) throw new Error(`not a version: ${JSON.stringify(s)}`);
+  return v;
 }
+
+async function latest() {
+  // The token (read-only, in CI) keeps the runner's shared address off the anonymous API limit.
+  const headers = { "user-agent": "hangar-release-pin" };
+  if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers });
+  if (!r.ok) throw new Error(`latest release: HTTP ${r.status}`);
+  return version((await r.json()).tag_name);
+}
+
+const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 
 async function sha256(v, name) {
   const r = await fetch(`https://github.com/${REPO}/releases/download/v${v}/${name}`);
   if (!r.ok) throw new Error(`${name} of v${v}: HTTP ${r.status}`);
-  return crypto.createHash("sha256").update(Buffer.from(await r.arrayBuffer())).digest("hex");
+  return digest(Buffer.from(await r.arrayBuffer()));
+}
+
+// The digest to pin: of the local file when there is one, after checking GitHub serves exactly that.
+async function pinnedDigest(v, name, from) {
+  const published = await sha256(v, name);
+  if (!from) return published;
+  const local = digest(fs.readFileSync(path.join(from, name)));
+  if (local !== published) throw new Error(`${name}: the published asset of v${v} differs from ${path.join(from, name)}`);
+  return local;
 }
 
 function pinned() {
@@ -53,10 +78,13 @@ async function check() {
   console.log(`cloud/public pins v${v}, digests match`);
 }
 
-async function pin(arg) {
-  const v = arg ? arg.replace(/^v/, "") : await latest();
-  const old = pinned().sh.version, a = assets(v);
-  const mac = await sha256(v, a.mac), win = await sha256(v, a.win);
+async function pin(args) {
+  const i = args.indexOf("--from");
+  const from = i >= 0 ? args.splice(i, 2)[1] : undefined;
+  if (i >= 0 && !from) throw new Error("--from needs a directory");
+  const v = args[0] ? version(args[0]) : await latest();
+  const old = version(pinned().sh.version), a = assets(v);
+  const mac = await pinnedDigest(v, a.mac, from), win = await pinnedDigest(v, a.win, from);
   const edit = (file, pairs) => {
     let text = fs.readFileSync(file, "utf8");
     for (const [re, to] of pairs) {
@@ -72,7 +100,7 @@ async function pin(arg) {
   console.log(`pinned v${v}\n  ${a.mac}  ${mac}\n  ${a.win}  ${win}\nNow commit, then npx wrangler deploy in cloud/`);
 }
 
-(process.argv[2] === "--check" ? check() : pin(process.argv[2])).catch((e) => {
+(process.argv[2] === "--check" ? check() : pin(process.argv.slice(2))).catch((e) => {
   console.error(e.message);
   process.exit(1);
 });

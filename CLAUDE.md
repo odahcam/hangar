@@ -8,7 +8,7 @@ Hangar is sold as the way to reduce the anxiety of working with many Claude Code
 
 The install scripts and download links of the landing (`cloud/public/install.sh`, `install.ps1`, `index.html`) pin one release by version and SHA-256. Every release, once its assets are published:
 
-1. `node scripts/release-pin.js` pins the latest release (or `node scripts/release-pin.js vX.Y.Z`).
+1. `node scripts/release-pin.js vX.Y.Z --from <dir>` pins it, `<dir>` holding the files attached to the release: the digests come from them, and the published assets must match them byte for byte.
 2. Commit the change.
 3. `npx wrangler deploy` in `cloud/`.
 

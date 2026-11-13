@@ -24,3 +24,5 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/release-pin.js --check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
