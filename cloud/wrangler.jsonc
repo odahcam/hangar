@@ -6,6 +6,8 @@
 	"account_id": "986fa99c80ca3636b341894942fb9bfe",
 	"workers_dev": false,
 	"routes": [{ "pattern": "hangar.odahcam.com", "custom_domain": true }],
+	// The landing page. Static asset requests don't run the Worker (nor count against its quota); /v1 always does.
+	"assets": { "directory": "./public", "run_worker_first": ["/v1/*"] },
 	// Logs keep request metadata only: the token travels in the Authorization header, never in the URL.
 	"observability": { "enabled": true },
 	"vars": {

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hangar</title>
+<meta name="description" content="Keep track of your Claude Code sessions, so you can close the ones you're not using without losing them.">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#2f6f5e">
+<link rel="stylesheet" href="/site.css">
+<script src="/site.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="brand" href="/"><img src="/icon.svg" width="28" height="28" alt=""> Hangar</a>
+    <a class="gh" href="https://github.com/odahcam/hangar">GitHub</a>
+  </header>
+
+  <section class="hero">
+    <img class="mark" src="/icon.svg" width="96" height="96" alt="">
+    <h1>Close Claude Code sessions<br>without losing them.</h1>
+    <p class="lead"><strong>Stale session anxiety is no more.</strong> Every session shows up on its own. Mark what to resume, set the order, write a note about where you stopped, and get back to any session with one click.</p>
+    <div class="cta">
+      <a class="btn primary" href="#install" data-os="mac">Download for macOS</a>
+      <a class="btn" href="#install" data-os="win">Download for Windows</a>
+    </div>
+    <p class="req">macOS 13+ on Apple Silicon · Windows 10/11 64-bit · needs <a href="https://docs.claude.com/en/docs/claude-code">Claude Code</a></p>
+  </section>
+
+  <section class="marquee" aria-label="Screenshots">
+    <div class="track">
+      <figure class="shot"><picture>
+        <source srcset="/img/pending-dark.png" media="(prefers-color-scheme: dark)">
+        <img src="/img/pending.png" width="2560" height="1922" alt="Hangar showing pending sessions with status, priority, notes and a done suggestion">
+      </picture></figure>
+      <figure class="shot"><picture>
+        <source srcset="/img/insights-dark.png" media="(prefers-color-scheme: dark)">
+        <img src="/img/insights.png" width="2560" height="3374" alt="Insights: RAM of open sessions, pending by project and age, prompts per day, new and done per week">
+      </picture></figure>
+    </div>
+  </section>
+
+  <section class="features">
+    <div><h3>Pending and Done</h3><p>Status, drag-to-reorder priority, notes, and which sessions are open right now.</p></div>
+    <div><h3>Resume, go to tab, close</h3><p>Reopens a closed session in a new terminal tab under its own account, or closes an open one.</p></div>
+    <div><h3>Several accounts</h3><p>Every <code>~/.claude*</code> folder is an account. Filter, rename, recolor, or move a session to another one.</p></div>
+    <div><h3>Transcript backup</h3><p>Keeps pending transcripts safe from Claude Code's automatic cleanup.</p></div>
+    <div><h3>Done detection</h3><p>Claude Haiku reads closed sessions and suggests the ones that look finished.</p></div>
+    <div><h3>Insights</h3><p>RAM per open session, what's pending per project, prompts per day, costliest sessions.</p></div>
+  </section>
+
+  <section class="install" id="install">
+    <h2>Install</h2>
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tab-mac" aria-controls="mac" aria-selected="true">macOS</button>
+      <button role="tab" id="tab-win" aria-controls="win" aria-selected="false">Windows</button>
+    </div>
+
+    <div id="mac" role="tabpanel" aria-labelledby="tab-mac">
+    <div class="ways">
+      <div class="cmd">
+        <div class="cmd-head"><span>Terminal</span><button class="copy" type="button">Copy</button></div>
+        <pre><code>curl -fsSL https://hangar.odahcam.com/install.sh | sh</code></pre>
+        <p>Installs or updates Hangar in /Applications and opens it, with no Gatekeeper prompts. <a href="/install.sh">See what it runs</a>.</p>
+      </div>
+      <div class="get">
+        <div class="cmd-head"><span>Download</span><span class="ver">v0.4.0</span></div>
+        <a class="btn primary big" href="https://github.com/odahcam/hangar/releases/download/v0.4.0/Hangar.zip">Download Hangar.zip</a>
+        <p>Apple Silicon, macOS 13 or later. Then follow the steps below.</p>
+      </div>
+    </div>
+    <p class="or">the download, step by step</p>
+    <ol class="steps">
+      <li><div class="n">1</div><div><h3>Download</h3><p>Get <a href="https://github.com/odahcam/hangar/releases/download/v0.4.0/Hangar.zip"><b>Hangar.zip</b></a>.</p></div></li>
+      <li><div class="n">2</div><div><h3>Move to Applications</h3><p>Double-click the zip, then drag <b>Hangar.app</b> into your <b>Applications</b> folder.</p></div></li>
+      <li><div class="n">3</div><div><h3>Open it the first time</h3><p>Hangar isn't from the App Store, so macOS stops the first launch. Click <b>Done</b>.</p>
+        <img src="/img/gatekeeper-blocked.png" width="306" height="314" alt="macOS dialog: “Hangar” Not Opened" loading="lazy"></div></li>
+      <li><div class="n">4</div><div><h3>Allow it</h3><p>Open <b>System Settings → Privacy &amp; Security</b>, scroll down to <b>Security</b>, and click <b>Open Anyway</b> next to the Hangar message.</p>
+        <img src="/img/open-anyway.png" width="484" height="190" alt="Privacy &amp; Security settings with the Open Anyway button" loading="lazy"></div></li>
+      <li><div class="n">5</div><div><h3>Confirm</h3><p>Click <b>Open Anyway</b> again and confirm with your password or Touch ID. You only do this once.</p>
+        <div class="side">
+          <img src="/img/open-anyway-confirm.png" width="324" height="405" alt="macOS dialog: Open “Hangar”? with the Open Anyway button" loading="lazy">
+          <div class="cmd">
+            <div class="cmd-head"><span>Prefer the Terminal?</span><button class="copy" type="button">Copy</button></div>
+            <pre><code>xattr -dr com.apple.quarantine /Applications/Hangar.app</code></pre>
+            <p>Does the same as steps 3 to 5.</p>
+          </div>
+        </div></div></li>
+      <li><div class="n">6</div><div><h3>Done</h3><p>Optionally choose <b>Hangar → Open at Login</b>. The first time you click <b>Resume</b>, allow Hangar to control Terminal: that's how it opens your sessions.</p></div></li>
+    </ol>
+    </div>
+
+    <div id="win" role="tabpanel" aria-labelledby="tab-win" hidden>
+    <div class="ways">
+      <div class="cmd">
+        <div class="cmd-head"><span>PowerShell</span><button class="copy" type="button">Copy</button></div>
+        <pre><code>irm https://hangar.odahcam.com/install.ps1 | iex</code></pre>
+        <p>Installs or updates Hangar for your user and opens it, with no SmartScreen prompt. <a href="/install.ps1">See what it runs</a>.</p>
+      </div>
+      <div class="get">
+        <div class="cmd-head"><span>Download</span><span class="ver">v0.4.0</span></div>
+        <a class="btn primary big" href="https://github.com/odahcam/hangar/releases/download/v0.4.0/Hangar_0.4.0_x64-setup.exe">Download the installer</a>
+        <p>Windows 10 or 11, 64-bit. Then follow the steps below.</p>
+      </div>
+    </div>
+    <p class="or">the download, step by step</p>
+    <ol class="steps">
+      <li><div class="n">1</div><div><h3>Download</h3><p>Get <a href="https://github.com/odahcam/hangar/releases/download/v0.4.0/Hangar_0.4.0_x64-setup.exe"><b>Hangar_0.4.0_x64-setup.exe</b></a>.</p></div></li>
+      <li><div class="n">2</div><div><h3>Run it</h3><p>The installer isn't signed, so SmartScreen may say <i>Windows protected your PC</i>. Click <b>More info</b>, then <b>Run anyway</b>. Hangar installs for your user only, with no administrator prompt.</p></div></li>
+      <li><div class="n">3</div><div><h3>Done</h3><p>Optionally choose <b>Hangar → Open at Login</b>. Resume opens sessions in a new <a href="https://aka.ms/terminal">Windows Terminal</a> tab.</p></div></li>
+    </ol>
+    </div>
+  </section>
+
+  <footer>Source-available, free for personal use · <a href="https://github.com/odahcam/hangar">github.com/odahcam/hangar</a></footer>
+</div>
+</body>
+</html>
