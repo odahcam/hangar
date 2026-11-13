@@ -188,7 +188,7 @@ test("on Windows a live session is live, with no tab to focus", { skip: !WIN32 }
 
 // Started from a Claude Code session, Hangar inherits the variables that would make the resumed claude its child
 // (no transcript): they are kept from wt and cleared inside the tab, which may get the window's environment instead.
-test("on Windows resuming a closed session opens a Windows Terminal tab in its cwd, not as a Claude Code child", { skip: !WIN32 }, async () => {
+test("on Windows resuming a closed session opens a Windows Terminal tab in its cwd, in PowerShell, not as a Claude Code child", { skip: !WIN32 }, async () => {
   const s = addSession(w, { cwd: String.raw`C:\work\a;b`, turns: [{ user: "a" }] });
   srv = await startServer(w, { CLAUDECODE: "1", CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CODE_SESSION_ID: "parent",
     NO_COLOR: "1", TERM_PROGRAM: "ghostty", TERM_PROGRAM_VERSION: "1.0" });
@@ -196,10 +196,13 @@ test("on Windows resuming a closed session opens a Windows Terminal tab in its c
   assert.deepEqual(r.json, { opened: true });
   const clear = ["CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
     "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_BRIDGE_MCP_CARRIER",
-    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"].map((k) => `set ${k}=&& `).join("");
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"].map((k) => `Remove-Item Env:${k} -ErrorAction Ignore\\; `).join("");
   const [call] = calls(w, "wt");
-  assert.deepEqual(call.args, ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`, "cmd", "/c",
-    `${clear}set CLAUDE_CONFIG_DIR=${w.claude.replaceAll(";", "\\;")}&& claude --resume ${s.id}`]);
+  // PowerShell 7 where it's installed (the CI runners have it), else Windows PowerShell; it stays after claude exits.
+  assert.ok(["pwsh.exe", "powershell.exe"].includes(call.args[5]), call.args[5]);
+  assert.deepEqual(call.args.slice(0, 5), ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`]);
+  assert.deepEqual(call.args.slice(6), ["-NoLogo", "-NoExit", "-Command",
+    `${clear}$env:CLAUDE_CONFIG_DIR = '${w.claude.replaceAll("'", "''").replaceAll(";", "\\;")}'\\; claude --resume ${s.id}`]);
   assert.deepEqual(call.sessionEnv, []);
   // Nor in the look of the terminal Hangar was started from: an agent's NO_COLOR would leave the session colorless.
   assert.deepEqual(call.terminalEnv, []);

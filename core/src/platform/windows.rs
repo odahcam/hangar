@@ -12,6 +12,9 @@ pub struct Windows;
 
 // Overridable so tests can stand in for Windows Terminal.
 static WT: LazyLock<String> = LazyLock::new(|| std::env::var("HANGAR_WT").unwrap_or_else(|_| "wt.exe".into()));
+// PowerShell 7 when it's installed (it's what Windows Terminal defaults to then), else Windows PowerShell.
+static POWERSHELL: LazyLock<String> =
+    LazyLock::new(|| if run("where.exe", &["pwsh.exe"], Duration::from_secs(5)).ok { "pwsh.exe" } else { "powershell.exe" }.into());
 
 impl Platform for Windows {
     fn caps(&self) -> Caps {
@@ -51,25 +54,27 @@ impl Platform for Windows {
     }
 
     // A new tab in the most recent Windows Terminal window; without Windows Terminal, a console window of its own.
-    // wt splits its command line on ";", so one in the path is escaped. Whether the tab gets our environment or that
-    // of the window it lands in isn't ours to choose, so the account is set by cmd inside the tab: `set X=` with
-    // nothing after it clears X.
-    // Unquoted, so a folder with a cmd metacharacter in its path can't be passed through.
+    // The tab runs PowerShell (7 when installed, else the one Windows ships), which stays once claude exits, as the
+    // shell does in a macOS Terminal tab. Whether the tab gets our environment or that of the window it lands in
+    // isn't ours to choose, so the account is set inside the tab. The path goes in a single-quoted string, where
+    // only a quote needs doubling; wt splits its command line on ";", so each one is escaped.
     fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String> {
-        let config_s = config.map(|d| d.to_string_lossy().to_string());
-        if config_s.as_deref().is_some_and(|d| d.contains(['&', '|', '<', '>', '^', '"', '%'])) {
-            return Err("unsupported_path".into());
-        }
         let dir = cwd.replace(';', "\\;");
         // The window may itself have been started from a Claude Code session; see proc::SESSION_ENV.
-        let clear: String = SESSION_ENV.iter().map(|k| format!("set {k}=&& ")).collect();
-        let cmd = format!("{clear}set CLAUDE_CONFIG_DIR={}&& claude --resume {id}", config_s.as_deref().unwrap_or("")).replace(';', "\\;");
+        let mut script: Vec<String> = SESSION_ENV.iter().map(|k| format!("Remove-Item Env:{k} -ErrorAction Ignore")).collect();
+        script.push(match config {
+            Some(d) => format!("$env:CLAUDE_CONFIG_DIR = '{}'", d.to_string_lossy().replace('\'', "''")),
+            None => "Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction Ignore".into(),
+        });
+        script.push(format!("claude --resume {id}"));
+        let script = script.join("; ").replace(';', "\\;");
         // The tab inherits wt's environment, ours: without the look of the terminal Hangar may have been started from.
         let mut wt = command(&WT);
         for k in TERMINAL_ENV {
             wt.env_remove(k);
         }
-        let r = run_with(wt.args(["-w", "0", "new-tab", "--startingDirectory", &dir, "cmd", "/c", &cmd]), None, Duration::from_secs(8));
+        let args = ["-w", "0", "new-tab", "--startingDirectory", &dir, POWERSHELL.as_str(), "-NoLogo", "-NoExit", "-Command", &script];
+        let r = run_with(wt.args(args), None, Duration::from_secs(8));
         if !r.missing {
             return Ok(());
         }
