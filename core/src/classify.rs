@@ -47,34 +47,40 @@ pub struct Outcome {
     pub cost_usd: Option<f64>,
 }
 
-fn find_claude() -> Option<String> {
+/// Where claude is, and whether it came from searching the PATH (rather than CLAUDE_BIN or a place Hangar knows).
+fn find_claude() -> Option<(String, bool)> {
     if let Ok(bin) = std::env::var("CLAUDE_BIN") {
-        return Some(bin);
+        return Some((bin, false));
     }
     let p = platform::current();
     let home = crate::home();
     if let Some(found) = p.claude_candidates(&home).into_iter().find(|c| c.exists()) {
-        return Some(found.to_string_lossy().into());
+        return Some((found.to_string_lossy().into(), false));
     }
     let (cmd, args) = p.which_claude();
-    // Asked from the home folder, not wherever this runs (the resume helper runs in the session's repository).
-    let out = run_disclaimed(command(&cmd).args(&args).current_dir(&home), None, Duration::from_secs(10));
+    // Asked from the home folder, not wherever this runs (the resume helper runs in the session's repository), and
+    // over the PATH's absolute entries only: a relative one (".", "bin") would point into that folder.
+    let mut c = command(&cmd);
+    if let Some(path) = std::env::var_os("PATH") {
+        c.env("PATH", std::env::join_paths(std::env::split_paths(&path).filter(|d| d.is_absolute())).unwrap_or(path));
+    }
+    let out = run_disclaimed(c.args(&args).current_dir(&home), None, Duration::from_secs(10));
     if !out.ok {
         return None;
     }
     // Only an absolute path; on Windows one that runs (npm also installs an extensionless sh shim, listed first).
     let runs = |s: &str| !cfg!(windows) || [".exe", ".cmd", ".bat"].iter().any(|e| s.to_ascii_lowercase().ends_with(e));
-    out.out.lines().map(str::trim).find(|s| std::path::Path::new(s).is_absolute() && runs(s)).map(String::from)
+    out.out.lines().map(str::trim).find(|s| std::path::Path::new(s).is_absolute() && runs(s)).map(|s| (s.to_string(), true))
 }
 
-/// Where claude is, looked up afresh (the helper runs once per resume).
-pub(crate) fn claude_path() -> Option<String> {
+/// Where claude is, looked up afresh (the helper runs once per resume), and whether the PATH said so.
+pub(crate) fn claude_path() -> Option<(String, bool)> {
     find_claude()
 }
 
 fn claude_bin() -> Option<&'static str> {
     static BIN: OnceLock<Option<String>> = OnceLock::new();
-    BIN.get_or_init(find_claude).as_deref()
+    BIN.get_or_init(|| find_claude().map(|(b, _)| b)).as_deref()
 }
 
 fn text_of(content: &Value) -> String {

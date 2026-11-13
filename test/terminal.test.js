@@ -217,23 +217,42 @@ test("the resume helper starts claude --resume under the given account, as no se
   const id = "0b7e4a2c-1d2f-4a6b-9c3d-5e6f7a8b9c0d";
   const env = { ...process.env, CLAUDE_BIN: path.join(__dirname, "bin", "claude.js"), FAKE_LOG: w.log, FAKE_VERDICTS: w.verdicts,
     CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "parent", CLAUDE_CONFIG_DIR: "/somewhere/else" };
-  // A tab runs it in the session's folder; here, one away from the fake claude.
+  // A tab runs it in the session's folder.
   const run = (args, cwd = w.root) => spawnSync(RESUME, args, { env, cwd, input: "", encoding: "utf8" });
   run([id, "--config", "/accounts/work"]);
   run([id]);
-  // A claude inside the session's folder is never the one run: the repository doesn't pick the binary.
-  const inside = run([id], path.join(__dirname, ".."));
-  assert.equal(inside.status, 2, inside.stderr);
-  assert.match(inside.stderr, /inside the session's folder/);
-  const [withAccount, plain] = calls(w, "claude");
+  // A claude Hangar picked (CLAUDE_BIN here, ~/.local/bin and the like for real) runs even from a folder that holds
+  // it: a session opened in the home folder resumes.
+  run([id], path.join(__dirname, ".."));
+  const [withAccount, plain, fromAbove] = calls(w, "claude");
   assert.deepEqual(withAccount.args, ["--resume", id]);
   assert.equal(withAccount.config, "/accounts/work");
   assert.deepEqual(withAccount.sessionEnv, []);
   // No account: the default one, so a CLAUDE_CONFIG_DIR the tab carries goes.
   assert.equal(plain.config, null);
+  assert.deepEqual(fromAbove.args, ["--resume", id]);
   // Anything but a session id is refused, claude not started.
   assert.equal(run(["--version; rm -rf ~"]).status, 2);
-  assert.equal(calls(w, "claude").length, 2);
+  assert.equal(calls(w, "claude").length, 3);
+});
+
+// Found by searching the PATH, a claude right in the session's folder (a login shell that puts "." back) is the
+// repository's pick, not Hangar's: refused. The login shell here is a stand-in that answers with that path.
+// (Skipped where a claude sits in a fixed place Hangar checks before the PATH: that one would be run instead.)
+const fixedClaude = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"].some((p) => fs.existsSync(p));
+test("the resume helper refuses a claude the PATH finds in the session's folder", { skip: WIN32 || fixedClaude }, () => {
+  const id = "0b7e4a2c-1d2f-4a6b-9c3d-5e6f7a8b9c0d";
+  const repo = path.join(w.root, "repo"), home = path.join(w.root, "home"), shell = path.join(w.root, "shell.sh");
+  fs.mkdirSync(repo);
+  fs.mkdirSync(home);
+  fs.writeFileSync(path.join(repo, "claude"), "#!/bin/sh\necho planted > \"$FAKE_LOG\"\n", { mode: 0o755 });
+  fs.writeFileSync(shell, `#!/bin/sh\necho '${fs.realpathSync(repo)}/claude'\n`, { mode: 0o755 });
+  const env = { ...process.env, HOME: home, SHELL: shell, FAKE_LOG: w.log };
+  delete env.CLAUDE_BIN;
+  const r = spawnSync(RESUME, [id], { env, cwd: fs.realpathSync(repo), encoding: "utf8" });
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /from the session's folder/);
+  assert.equal(fs.readFileSync(w.log, "utf8"), "");
 });
 
 test("on Windows resuming a session that is still running is refused instead of forking it", { skip: !WIN32 }, async () => {

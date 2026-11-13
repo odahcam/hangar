@@ -31,13 +31,15 @@ pub fn valid_id(id: &str) -> bool {
 
 /// For the helper: `claude --resume <id>` under the account in `config` (None: the default account, so a
 /// CLAUDE_CONFIG_DIR the tab carries goes), without the variables that would make it a Claude Code session's child.
-/// claude is looked up away from the session's folder (see classify::find_claude), and one found inside it anyway
-/// (a PATH that lists "." or the folder) is refused: the repository being resumed doesn't get to pick the binary.
+/// claude is looked up away from the session's folder, over the PATH's absolute entries (see classify::find_claude).
+/// One the PATH search still finds right in that folder (a login shell that puts "." back) is refused: the repository
+/// being resumed doesn't get to pick the binary. The places Hangar knows (~/.local/bin and the like) are its own
+/// choice, so a session opened in the home folder resumes like any other.
 pub fn claude_command(id: &str, config: Option<&str>) -> Result<Command, String> {
-    let bin = crate::classify::claude_path().ok_or("claude not found")?;
+    let (bin, searched) = crate::classify::claude_path().ok_or("claude not found")?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    if Path::new(&bin).starts_with(&cwd) {
-        return Err(format!("refusing {bin}, inside the session's folder"));
+    if searched && Path::new(&bin).parent() == Some(cwd.as_path()) {
+        return Err(format!("refusing {bin}, from the session's folder"));
     }
     let mut c = command(&bin);
     for k in SESSION_ENV {
