@@ -1,0 +1,26 @@
+# The landing page's install scripts and download links (cloud/public) pin one release by version and SHA-256.
+# Red as soon as a release is published without pinning it, and whenever the pins drift from the latest release.
+name: Release pin
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+  pull_request:
+    paths: [cloud/public/**, scripts/release-pin.js]
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: node scripts/release-pin.js --check
