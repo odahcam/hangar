@@ -2,7 +2,7 @@
 // idle-tab cleanup here. A running session is still brought forward: its console's window leads to the terminal
 // window that hosts it, and UI Automation selects the tab whose title is that console's title.
 use super::{Caps, Platform, Tab};
-use crate::proc::{command, run, run_with, SESSION_ENV};
+use crate::proc::{command, run, run_with, SESSION_ENV, TERMINAL_ENV};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -51,8 +51,9 @@ impl Platform for Windows {
     }
 
     // A new tab in the most recent Windows Terminal window; without Windows Terminal, a console window of its own.
-    // wt splits its command line on ";", so one in the path is escaped. The tab gets the environment of the window
-    // it lands in, not ours, so the account is set by cmd inside the tab: `set X=` with nothing after it clears X.
+    // wt splits its command line on ";", so one in the path is escaped. Whether the tab gets our environment or that
+    // of the window it lands in isn't ours to choose, so the account is set by cmd inside the tab: `set X=` with
+    // nothing after it clears X.
     // Unquoted, so a folder with a cmd metacharacter in its path can't be passed through.
     fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String> {
         let config_s = config.map(|d| d.to_string_lossy().to_string());
@@ -63,13 +64,21 @@ impl Platform for Windows {
         // The window may itself have been started from a Claude Code session; see proc::SESSION_ENV.
         let clear: String = SESSION_ENV.iter().map(|k| format!("set {k}=&& ")).collect();
         let cmd = format!("{clear}set CLAUDE_CONFIG_DIR={}&& claude --resume {id}", config_s.as_deref().unwrap_or("")).replace(';', "\\;");
-        let r = run(&WT, &["-w", "0", "new-tab", "--startingDirectory", &dir, "cmd", "/c", &cmd], Duration::from_secs(8));
+        // The tab inherits wt's environment, ours: without the look of the terminal Hangar may have been started from.
+        let mut wt = command(&WT);
+        for k in TERMINAL_ENV {
+            wt.env_remove(k);
+        }
+        let r = run_with(wt.args(["-w", "0", "new-tab", "--startingDirectory", &dir, "cmd", "/c", &cmd]), None, Duration::from_secs(8));
         if !r.missing {
             return Ok(());
         }
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_CONSOLE: u32 = 0x10;
         let mut c = command("claude");
+        for k in TERMINAL_ENV {
+            c.env_remove(k);
+        }
         match config {
             Some(d) => c.env("CLAUDE_CONFIG_DIR", d),
             None => c.env_remove("CLAUDE_CONFIG_DIR"),

@@ -22,6 +22,12 @@ pub const SESSION_ENV: &[&str] = &[
     "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
 ];
 
+/// How the terminal Hangar may have been started from looks (an agent's tool shell sets NO_COLOR, another terminal
+/// its TERM_PROGRAM). A tab that inherits Hangar's environment would resume the session without color, or as if in
+/// that terminal; the new tab describes itself.
+#[cfg_attr(not(windows), allow(dead_code))] // macOS tabs get Terminal's environment, not Hangar's
+pub const TERMINAL_ENV: &[&str] = &["NO_COLOR", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"];
+
 /// A command for `bin`, without the environment of a Claude Code session Hangar may have been started from.
 /// A `.js` path runs under `node`, so the test fakes in test/bin work on every OS (Windows can't exec a shebang script).
 pub fn command(bin: &str) -> Command {
