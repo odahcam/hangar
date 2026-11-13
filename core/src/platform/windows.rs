@@ -56,14 +56,14 @@ impl Platform for Windows {
     // A new tab in the most recent Windows Terminal window; without Windows Terminal, a console window of its own.
     // The tab runs PowerShell (7 when installed, else the one Windows ships), which stays once claude exits, as the
     // shell does in a macOS Terminal tab. Whether the tab gets our environment or that of the window it lands in
-    // isn't ours to choose, so the account is set inside the tab. The path goes in a single-quoted string, where
-    // only a quote needs doubling; wt splits its command line on ";", so each one is escaped.
+    // isn't ours to choose, so the account is set inside the tab. The path goes in a single-quoted string (see
+    // single_quoted); wt splits its command line on ";", so each one is escaped.
     fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String> {
         let dir = cwd.replace(';', "\\;");
         // The window may itself have been started from a Claude Code session; see proc::SESSION_ENV.
         let mut script: Vec<String> = SESSION_ENV.iter().map(|k| format!("Remove-Item Env:{k} -ErrorAction Ignore")).collect();
         script.push(match config {
-            Some(d) => format!("$env:CLAUDE_CONFIG_DIR = '{}'", d.to_string_lossy().replace('\'', "''")),
+            Some(d) => format!("$env:CLAUDE_CONFIG_DIR = '{}'", single_quoted(&d.to_string_lossy())),
             None => "Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction Ignore".into(),
         });
         script.push(format!("claude --resume {id}"));
@@ -171,6 +171,12 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     s
+}
+
+/// Content for a PowerShell single-quoted string. PowerShell takes the curly quotes (U+2018 to U+201B) for a quote
+/// too, so each of the five is doubled, as its own EscapeSingleQuotedStringContent does; nothing else is special.
+fn single_quoted(s: &str) -> String {
+    s.chars().flat_map(|c| if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') { vec![c, c] } else { vec![c] }).collect()
 }
 
 // The few Win32/NT calls needed, declared directly.

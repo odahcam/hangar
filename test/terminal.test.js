@@ -3,7 +3,7 @@ const { test, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { DARWIN, WIN32, makeWorld, addSession, appendTurns, addLive, setTabs, calls, resumed, startServer, cleanup, waitFor } = require("./helpers");
+const { DARWIN, WIN32, makeWorld, addAccount, addSession, appendTurns, addLive, setTabs, calls, resumed, startServer, cleanup, waitFor } = require("./helpers");
 
 let w, srv;
 beforeEach(() => { w = makeWorld(); });
@@ -207,6 +207,17 @@ test("on Windows resuming a closed session opens a Windows Terminal tab in its c
   // Nor in the look of the terminal Hangar was started from: an agent's NO_COLOR would leave the session colorless.
   assert.deepEqual(call.terminalEnv, []);
   assert.ok(resumed(w, s.id));
+});
+
+// PowerShell closes a single-quoted string on a curly quote too: each kind is doubled, so the name stays a name.
+test("on Windows an account folder with straight or curly quotes stays inside the PowerShell string", { skip: !WIN32 }, async () => {
+  const dir = addAccount(w, "claude-it's \u2018a\u2019 \u201Ab\u201B");
+  const s = addSession(w, { claude: dir, cwd: String.raw`C:\work\q`, turns: [{ user: "a" }] });
+  srv = await startServer(w);
+  assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { opened: true });
+  const [call] = calls(w, "wt");
+  const doubled = dir.replace(/['\u2018\u2019\u201A\u201B]/g, (q) => q + q).replaceAll(";", "\\;");
+  assert.ok(call.args.at(-1).includes(`$env:CLAUDE_CONFIG_DIR = '${doubled}'\\; claude --resume ${s.id}`), call.args.at(-1));
 });
 
 test("on Windows resuming a session that is still running is refused instead of forking it", { skip: !WIN32 }, async () => {
