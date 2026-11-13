@@ -22,6 +22,8 @@ import { append, b64url, bodyOf, digest, isKey, unb64url, verifySig, type Entry,
 
 export interface Env extends AuthEnv {
 	ACCOUNT: DurableObjectNamespace<Account>;
+	CONNECT_PER_IP: RateLimit;
+	CONNECT_PER_ACCOUNT: RateLimit;
 }
 
 interface Attachment {

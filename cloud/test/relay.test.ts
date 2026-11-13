@@ -11,9 +11,12 @@ const now = () => Math.floor(Date.now() / 1000);
 // Each test gets accounts of its own: Durable Object storage and sockets outlive a test.
 let SUB = "";
 let OTHER = "";
+// ...and an address of its own, as the connection rate limits count per address.
+let IP = "";
 beforeEach(() => {
 	SUB = `user-${crypto.randomUUID()}`;
 	OTHER = `user-${crypto.randomUUID()}`;
+	IP = `10.${[0, 0, 0].map(() => Math.floor(Math.random() * 256)).join(".")}`;
 });
 
 async function token(claims: Record<string, unknown> = {}, alg = "EdDSA"): Promise<string> {
@@ -84,8 +87,8 @@ class Conn {
 	}
 }
 
-async function upgrade(tok?: string): Promise<Response> {
-	const headers: Record<string, string> = { upgrade: "websocket" };
+async function upgrade(tok?: string, ip = IP): Promise<Response> {
+	const headers: Record<string, string> = { upgrade: "websocket", "cf-connecting-ip": ip };
 	if (tok) headers.authorization = `Bearer ${tok}`;
 	return SELF.fetch("https://hangar.odahcam.com/v1/connect", { headers });
 }
@@ -155,9 +158,23 @@ describe("upgrade", () => {
 		expect((await c.json("challenge")).nonce).toMatch(/^[\w-]{43}$/);
 	});
 
+	it("limits connection attempts per address, junk tokens included, and per account", async () => {
+		const codes = [];
+		for (let i = 0; i < 31; i++) codes.push((await upgrade("junk")).status);
+		expect(codes.slice(0, 30).every((c) => c === 401)).toBe(true);
+		const r = await upgrade(await token());
+		expect(r.status).toBe(429);
+		expect(r.headers.get("retry-after")).toBe("60");
+		// Another address still gets in; the account's own limit holds whatever the address.
+		const tok = await token({ sub: OTHER });
+		const fresh = () => `10.${[0, 0, 0].map(() => Math.floor(Math.random() * 256)).join(".")}`;
+		for (let i = 0; i < 30; i++) expect((await upgrade(tok, fresh())).status).toBe(101);
+		expect((await upgrade(tok, fresh())).status).toBe(429);
+	});
+
 	it("never takes the account from the client", async () => {
 		const r = await SELF.fetch("https://hangar.odahcam.com/v1/connect", {
-			headers: { upgrade: "websocket", authorization: `Bearer ${await token()}`, "x-relay-sub": OTHER },
+			headers: { upgrade: "websocket", "cf-connecting-ip": IP, authorization: `Bearer ${await token()}`, "x-relay-sub": OTHER },
 		});
 		const c = new Conn(r.webSocket!);
 		const d = await device();
