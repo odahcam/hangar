@@ -451,8 +451,15 @@ function statusIcon(st) {
 // The index has room for the last two folders of the project; the full path is in its tooltip and the panel.
 const shortProject = (p) => (p || "?").split(/[\\/]/).filter(Boolean).slice(-2).join("/") || "?";
 const familyOf = (s) => s.family ? items.filter((x) => x.family === s.family).sort((a, b) => (b.lastAt || "").localeCompare(a.lastAt || "")) : [s];
-// Brings a running session's terminal forward, or opens it in a new one.
+// Brings a running session's terminal forward, or opens it in a new one. On another machine that happens on its
+// screen, not this one: the button says where, and a toast confirms it, since nothing opens here.
 function resumeBtn(s) {
+  if (machine) {
+    const name = machineName(machine);
+    const b = btn(t(s.live ? "goToTabOn" : "resumeOn", { name }), "primary",
+      () => pending(b, t("openingOn", { name }), () => api("POST", `/api/resume/${s.id}`), t("openedOn", { name })));
+    return b;
+  }
   const b = btn(s.live ? t("goToTab") : t("resume"), "primary", () => pending(b, t("opening"), () => api("POST", `/api/resume/${s.id}`)));
   return b;
 }
