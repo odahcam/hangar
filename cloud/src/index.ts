@@ -17,6 +17,10 @@ export default {
 		// account's object. Per account and address first, so that token spends its own address's budget and not the
 		// one the account's machines reconnect on; per account alone, higher, as the ceiling.
 		// The app reconnects with backoff (core/src/cloud/link.rs), which a 429 just lengthens.
+		// Open, to come back to: someone holding a valid token of an account fills its ceiling from 4 IPv6 /64s (any
+		// /56 or /48 delegation has them) and keeps the account's machines from reconnecting at that Cloudflare location
+		// until the token expires (up to 1 h after a revoke). Accepted for now. Closing it means telling a member from
+		// a guest before the upgrade (the device's proof in the request), a change of design.
 		const where = addressKey(req.headers.get("cf-connecting-ip") ?? "");
 		if (!(await env.CONNECT_PER_ACCOUNT_ADDRESS.limit({ key: `${id.sub} ${where}` })).success) return tooMany();
 		if (!(await env.CONNECT_PER_ACCOUNT.limit({ key: id.sub })).success) return tooMany();
