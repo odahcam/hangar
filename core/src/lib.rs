@@ -6,6 +6,7 @@
 // desktop app (Tauri `invoke`) or over HTTP by the `hangar-server` binary the tests and `npm start` use.
 mod accounts;
 mod classify;
+pub mod cli;
 pub mod cloud;
 mod db;
 mod insights;

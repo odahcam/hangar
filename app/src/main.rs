@@ -101,6 +101,10 @@ fn show_main(app: &AppHandle) {
 }
 
 fn main() {
+    // `Hangar --offer` / `--pair <code>`: a command that asks the running app (see core/src/cli.rs).
+    if let Some(code) = hangar_core::cli::client() {
+        std::process::exit(code);
+    }
     let hangar = Hangar::open(Config::from_env()).unwrap_or_else(|e| {
         eprintln!("hangar: {e}");
         std::process::exit(1);
@@ -108,17 +112,15 @@ fn main() {
     hangar.spawn_background();
     // Test instances run side by side on throwaway data: no single instance, no device identity in the real keychain.
     let test_instance = std::env::var_os("HANGAR_WEBVIEW_DATA").is_some();
-    if !test_instance {
-        if let Err(e) = hangar.start_cloud() {
-            eprintln!("cloud: {e}");
-        }
-    }
 
     let mut app = tauri::Builder::default();
     if !test_instance {
-        // First: a second launch (on Windows, how a hangar:// link arrives) hands its arguments to this instance
-        // and quits.
+        // First: a second launch (on Windows, how a hangar:// link arrives; a pairing command) hands its arguments to
+        // this instance and quits.
         app = app.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if hangar_core::cli::serve(&app.state::<Arc<Hangar>>(), &argv) {
+                return;
+            }
             for a in argv.iter().skip(1) {
                 open_link(app, a);
             }
@@ -154,8 +156,18 @@ fn main() {
             }
             _ => {}
         })
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
+            // Remote control starts once this is the only instance: a second launch quits in the plugin above, before
+            // it could load the device identity or open a second link to the relay.
+            if !test_instance {
+                let hangar = app.state::<Arc<Hangar>>();
+                if let Err(e) = hangar.start_cloud() {
+                    eprintln!("cloud: {e}");
+                }
+                // Started by a pairing command when the app wasn't running.
+                hangar_core::cli::serve(&hangar, &std::env::args().collect::<Vec<_>>());
+            }
             // macOS delivers links as events; on Windows the installer registers the scheme, and a dev build
             // registers it here.
             #[cfg(all(windows, debug_assertions))]
