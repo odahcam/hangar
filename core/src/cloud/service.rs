@@ -155,7 +155,7 @@ impl Cloud {
 
     /// Now by the relay's clock: what calls are timed by, so machines whose clocks disagree still agree on a call's age.
     fn relay_now(&self) -> i64 {
-        chrono::Utc::now().timestamp_millis() + self.skew.load(Ordering::SeqCst)
+        chrono::Utc::now().timestamp_millis().saturating_add(self.skew.load(Ordering::SeqCst))
     }
 
     fn send(&self, frames: Vec<(String, Vec<u8>)>) {
@@ -476,8 +476,8 @@ impl Cloud {
                 Some(h) => {
                     // Noise stops replays, not delays: a call the relay held back (a close of a session resumed
                     // since) is refused once it's older than this, or from too far ahead.
-                    let age = me.relay_now() - msg["at"].as_i64().unwrap_or(0);
-                    if age.abs() > MAX_CALL_AGE_MS {
+                    let age = me.relay_now().saturating_sub(msg["at"].as_i64().unwrap_or(0));
+                    if age.saturating_abs() > MAX_CALL_AGE_MS {
                         Reply { status: 408, body: json!({ "error": "stale_call" }) }
                     } else {
                         h.handle_remote(&from, msg["m"].as_str().unwrap_or(""), msg["p"].as_str().unwrap_or(""), msg["b"].as_str().unwrap_or(""))

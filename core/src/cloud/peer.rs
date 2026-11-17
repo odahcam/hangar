@@ -24,6 +24,9 @@ const CHUNK: usize = MAX_NOISE - 16 - 1;
 pub const MAX_MESSAGE: usize = 8 * 1024 * 1024;
 /// Sessions are replaced after this long, so no key lives for days.
 const SESSION_TTL: Duration = Duration::from_secs(3600);
+/// Data on a session older than SESSION_TTL by more than this is refused: a cap on how long the relay can hold a
+/// message back that, unlike a call's age, doesn't go by the relay's clock.
+const SESSION_GRACE: Duration = Duration::from_secs(120);
 /// A handshake that hasn't completed by then is dropped with what was waiting on it: a reply the relay held back
 /// mustn't release old requests whenever it likes.
 const HANDSHAKE_TTL: Duration = Duration::from_secs(10);
@@ -194,7 +197,8 @@ impl Peers {
                     return (out, done);
                 };
                 let State::Ready(ts) = &mut s.state else { return (out, done) };
-                let ok = ts.read_message(body, &mut buf).ok().filter(|&n| n >= 1).map(|n| (buf[0], buf[1..n].to_vec()));
+                let fresh = s.started.elapsed() < SESSION_TTL + SESSION_GRACE;
+                let ok = fresh.then(|| ts.read_message(body, &mut buf).ok()).flatten().filter(|&n| n >= 1).map(|n| (buf[0], buf[1..n].to_vec()));
                 let mine = self.mine.get(from) == Some(&sid);
                 match ok {
                     Some((more, chunk)) if s.partial.len() + chunk.len() <= MAX_MESSAGE => {
@@ -203,7 +207,8 @@ impl Peers {
                             done.push(Incoming { sid, mine, message: std::mem::take(&mut s.partial) });
                         }
                     }
-                    // Undecryptable (replayed, reordered, forged) or oversized: the session is over.
+                    // Undecryptable (replayed, reordered, forged), oversized or on a session past its time: the
+                    // session is over.
                     _ => {
                         self.sessions.remove(&key);
                         if self.mine.get(from) == Some(&sid) {

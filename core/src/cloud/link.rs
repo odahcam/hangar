@@ -21,6 +21,8 @@ const PING_EVERY: Duration = Duration::from_secs(30);
 /// Renew the token this long before it expires.
 const RENEW_BEFORE_S: i64 = 120;
 const TICK: Duration = Duration::from_millis(200);
+/// How far the relay's clock may be from this machine's and still be what calls are timed by.
+const MAX_SKEW_MS: i64 = 120_000;
 
 /// What leaves: a control message, or a frame for another device.
 pub enum Cmd {
@@ -146,9 +148,17 @@ fn session(auth: &Auth, identity: &Identity, handler: &dyn Handler, rx: &Receive
         }
     };
     // The relay read its clock between the proof leaving and the answer arriving: taken as halfway, the error is at
-    // most half the round trip. A relay that doesn't say: no skew.
+    // most half the round trip. A relay that doesn't say: no skew. The relay isn't trusted with the clock calls are
+    // aged by beyond MAX_SKEW_MS: past that it's ignored, so a call it holds back arrives at most
+    // MAX_CALL_AGE_MS + 2 × MAX_SKEW_MS late.
     let got = chrono::Utc::now().timestamp_millis();
-    let skew = ready["now"].as_i64().map_or(0, |now| now - (sent + got) / 2);
+    let skew = ready["now"].as_i64().map_or(0, |now| now.saturating_sub(sent / 2 + got / 2));
+    let skew = if skew.abs() <= MAX_SKEW_MS {
+        skew
+    } else {
+        eprintln!("cloud: the relay's clock is {skew} ms from this machine's; not used");
+        0
+    };
     let chain: Vec<Entry> = serde_json::from_value(ready["chain"].clone()).map_err(fail)?;
     let online: Vec<String> = serde_json::from_value(ready["online"].clone()).unwrap_or_default();
     handler.state(LinkState::Online);
