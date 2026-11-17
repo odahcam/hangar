@@ -218,13 +218,16 @@ impl Cloud {
             let key = (device.to_string(), id);
             let (tx, rx) = mpsc::channel();
             let msg = json!({ "id": id, "at": self.relay_now(), "m": method, "p": path, "b": body }).to_string();
+            // Registered under the peers lock: a reset of that session taken in between would otherwise miss it.
             let sent = {
                 let mut peers = lock(&self.peers);
-                peers.send(&members, device, msg.as_bytes()).map(|frames| (frames, peers.mine(device)))
+                peers.send(&members, device, msg.as_bytes()).map(|frames| {
+                    lock(&self.calls).insert(key.clone(), (tx, peers.mine(device)));
+                    frames
+                })
             };
             let answer = match sent {
-                Ok((frames, sid)) => {
-                    lock(&self.calls).insert(key.clone(), (tx, sid));
+                Ok(frames) => {
                     self.send(frames);
                     rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok()
                 }
