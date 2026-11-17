@@ -68,6 +68,8 @@ pub struct Peers {
     sessions: HashMap<(String, [u8; 8]), Session>,
     /// The session we initiated to each peer.
     mine: HashMap<String, [u8; 8]>,
+    /// Added to every session's age (tests only; always zero otherwise).
+    aged: Duration,
 }
 
 fn prologue(initiator: &str, responder: &str) -> Vec<u8> {
@@ -88,18 +90,16 @@ fn frame(kind: u8, sid: &[u8; 8], body: &[u8]) -> Vec<u8> {
 
 impl Peers {
     pub fn new(me: String, dh_private: &[u8; 32]) -> Peers {
-        Peers { me, dh_private: Zeroizing::new(*dh_private), sessions: HashMap::new(), mine: HashMap::new() }
+        Peers { me, dh_private: Zeroizing::new(*dh_private), sessions: HashMap::new(), mine: HashMap::new(), aged: Duration::ZERO }
+    }
+
+    /// For tests: sessions count as `by` older (an Instant can't go back before the boot, which on Windows is near).
+    #[cfg(test)]
+    pub fn age_sessions(&mut self, by: Duration) {
+        self.aged = by;
     }
 
     /// Drops every session with a device that is no longer a member.
-    /// For tests: every session started `by` earlier.
-    #[cfg(test)]
-    pub fn age_sessions(&mut self, by: Duration) {
-        for s in self.sessions.values_mut() {
-            s.started = s.started.checked_sub(by).expect("an Instant that far back");
-        }
-    }
-
     pub fn retain(&mut self, members: &Members) {
         self.sessions.retain(|(peer, _), _| members.contains_key(peer));
         self.mine.retain(|peer, _| members.contains_key(peer));
@@ -205,7 +205,7 @@ impl Peers {
                     return (out, done);
                 };
                 let State::Ready(ts) = &mut s.state else { return (out, done) };
-                let fresh = s.started.elapsed() < SESSION_TTL + SESSION_GRACE;
+                let fresh = s.started.elapsed() + self.aged < SESSION_TTL + SESSION_GRACE;
                 let ok = fresh.then(|| ts.read_message(body, &mut buf).ok()).flatten().filter(|&n| n >= 1).map(|n| (buf[0], buf[1..n].to_vec()));
                 let mine = self.mine.get(from) == Some(&sid);
                 match ok {
