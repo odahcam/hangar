@@ -4,8 +4,9 @@
 // Protocol (text frames are JSON, binary frames carry device traffic):
 //   relay → app  {t:"challenge", nonce}                     on connect
 //   app → relay  {t:"prove", device, sig}                   Ed25519 over "hangar-relay-v1\n<sub>\n<nonce>"
-//   relay → app  {t:"ready", epoch, chain, online, reset}   chain: every entry; online: proven device keys;
-//                                                           reset: when a pending recovery reset runs, or null
+//   relay → app  {t:"ready", epoch, chain, online, reset, now}  chain: every entry; online: proven device keys;
+//                                                           reset: when a pending recovery reset runs, or null;
+//                                                           now: the relay's clock (ms), what apps time calls by
 //   app → relay  {t:"auth", token}                          a fresh access token before the current one expires
 //   app → relay  {t:"chain.append", entry}                  signed by the sending device
 //   app → relay  {t:"chain.reset", id_token}                recovery when every device is lost: id_token of a fresh
@@ -181,7 +182,7 @@ export class Account extends DurableObject<Env> {
 		att.device = m.device;
 		ws.serializeAttachment(att);
 		const due = Number(this.meta("reset_due") ?? 0) || null;
-		ws.send(JSON.stringify({ t: "ready", epoch: c.epoch, chain: c.entries, online: this.online(), reset: due }));
+		ws.send(JSON.stringify({ t: "ready", epoch: c.epoch, chain: c.entries, online: this.online(), reset: due, now: Date.now() }));
 		this.presence();
 		await this.schedule();
 	}

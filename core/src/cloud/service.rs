@@ -19,14 +19,14 @@ use super::secrets;
 use crate::{Hangar, Reply};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
-/// How old (or how far ahead, for clocks that disagree) a call may be when it arrives.
-const MAX_CALL_AGE_MS: i64 = 30_000;
+/// How old (or how far ahead) a call may be when it arrives, both machines timing it by the relay's clock.
+const MAX_CALL_AGE_MS: i64 = 60_000;
 /// Calls from one device handled at once; more are refused, not queued.
 const MAX_CALLS_PER_DEVICE: usize = 4;
 
@@ -85,6 +85,8 @@ pub struct Cloud {
     joined: Mutex<Option<String>>,
     /// The last pairing this machine tried was refused.
     join_refused: AtomicBool,
+    /// How far the relay's clock is ahead of this machine's (ms), as of the last connect.
+    skew: AtomicI64,
     stop: Arc<AtomicBool>,
 }
 
@@ -139,6 +141,7 @@ impl Cloud {
             asked: Mutex::default(),
             joined: Mutex::default(),
             join_refused: AtomicBool::new(false),
+            skew: AtomicI64::new(0),
             stop: Arc::new(AtomicBool::new(false)),
         });
         let (auth, handler, stop) = (Arc::clone(&cloud.auth), Arc::clone(&cloud) as Arc<dyn Handler>, Arc::clone(&cloud.stop));
@@ -148,6 +151,11 @@ impl Cloud {
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Now by the relay's clock: what calls are timed by, so machines whose clocks disagree still agree on a call's age.
+    fn relay_now(&self) -> i64 {
+        chrono::Utc::now().timestamp_millis() + self.skew.load(Ordering::SeqCst)
     }
 
     fn send(&self, frames: Vec<(String, Vec<u8>)>) {
@@ -193,7 +201,7 @@ impl Cloud {
         let key = (device.to_string(), id);
         let (tx, rx) = mpsc::channel();
         lock(&self.calls).insert(key.clone(), tx);
-        let msg = json!({ "id": id, "at": chrono::Utc::now().timestamp_millis(), "m": method, "p": path, "b": body }).to_string();
+        let msg = json!({ "id": id, "at": self.relay_now(), "m": method, "p": path, "b": body }).to_string();
         let sent = lock(&self.peers).send(&members, device, msg.as_bytes());
         let reply = match sent {
             Ok(frames) => {
@@ -467,8 +475,8 @@ impl Cloud {
                 None => Reply { status: 503, body: json!({ "error": "stopping" }) },
                 Some(h) => {
                     // Noise stops replays, not delays: a call the relay held back (a close of a session resumed
-                    // since) is refused once it's older than this, or from too far ahead for clocks that disagree.
-                    let age = chrono::Utc::now().timestamp_millis() - msg["at"].as_i64().unwrap_or(0);
+                    // since) is refused once it's older than this, or from too far ahead.
+                    let age = me.relay_now() - msg["at"].as_i64().unwrap_or(0);
                     if age.abs() > MAX_CALL_AGE_MS {
                         Reply { status: 408, body: json!({ "error": "stale_call" }) }
                     } else {
@@ -516,7 +524,8 @@ impl Handler for Cloud {
         lock(&self.view).link = s;
     }
 
-    fn ready(&self, sub: &str, nonce: &str, epoch: u64, chain: Vec<Entry>, online: Vec<String>, reset: Option<i64>) {
+    fn ready(&self, sub: &str, nonce: &str, epoch: u64, chain: Vec<Entry>, online: Vec<String>, reset: Option<i64>, skew: i64) {
+        self.skew.store(skew, Ordering::SeqCst);
         {
             let mut v = lock(&self.view);
             v.sub = Some(sub.into());

@@ -197,6 +197,13 @@ describe("upgrade", () => {
 });
 
 describe("proof of the device key", () => {
+	it("tells a proven socket the relay's clock", async () => {
+		const before = Date.now();
+		const [, ready] = await online(await device());
+		expect(ready.now).toBeGreaterThanOrEqual(before);
+		expect(ready.now).toBeLessThanOrEqual(Date.now());
+	});
+
 	it("closes a socket whose proof is signed by another key", async () => {
 		const [a, b] = [await device(), await device()];
 		const c = await connect();

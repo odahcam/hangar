@@ -39,8 +39,10 @@ pub enum LinkState {
 
 pub trait Handler: Send + Sync {
     fn state(&self, s: LinkState);
-    /// The relay accepted the socket: the account, its chain and who is online.
-    fn ready(&self, sub: &str, nonce: &str, epoch: u64, chain: Vec<Entry>, online: Vec<String>, reset: Option<i64>);
+    /// The relay accepted the socket: the account, its chain, who is online, and how far the relay's clock is ahead
+    /// of this machine's (ms).
+    #[allow(clippy::too_many_arguments)]
+    fn ready(&self, sub: &str, nonce: &str, epoch: u64, chain: Vec<Entry>, online: Vec<String>, reset: Option<i64>, skew: i64);
     /// Any other control message (chain, reset, presence, offline, error, ...).
     fn control(&self, m: Value);
     fn frame(&self, from: String, payload: Vec<u8>);
@@ -135,6 +137,7 @@ fn session(auth: &Auth, identity: &Identity, handler: &dyn Handler, rx: &Receive
     let challenge = read_json(&mut ws)?;
     let nonce = challenge["nonce"].as_str().filter(|_| challenge["t"] == "challenge").ok_or_else(|| fail("no challenge"))?.to_string();
     let prove = json!({ "t": "prove", "device": identity.device(), "sig": identity.prove(&access.sub, &nonce) });
+    let sent = chrono::Utc::now().timestamp_millis();
     ws.send(Message::Text(prove.to_string().into())).map_err(fail)?;
     let ready = loop {
         let m = read_json(&mut ws)?;
@@ -142,10 +145,14 @@ fn session(auth: &Auth, identity: &Identity, handler: &dyn Handler, rx: &Receive
             break m;
         }
     };
+    // The relay read its clock between the proof leaving and the answer arriving: taken as halfway, the error is at
+    // most half the round trip. A relay that doesn't say: no skew.
+    let got = chrono::Utc::now().timestamp_millis();
+    let skew = ready["now"].as_i64().map_or(0, |now| now - (sent + got) / 2);
     let chain: Vec<Entry> = serde_json::from_value(ready["chain"].clone()).map_err(fail)?;
     let online: Vec<String> = serde_json::from_value(ready["online"].clone()).unwrap_or_default();
     handler.state(LinkState::Online);
-    handler.ready(&access.sub, &nonce, ready["epoch"].as_u64().unwrap_or(0), chain, online, ready["reset"].as_i64());
+    handler.ready(&access.sub, &nonce, ready["epoch"].as_u64().unwrap_or(0), chain, online, ready["reset"].as_i64(), skew);
 
     set_timeout(&mut ws, Some(TICK));
     let (mut exp, mut last_ping, mut renewing) = (access.exp, Instant::now(), false);
