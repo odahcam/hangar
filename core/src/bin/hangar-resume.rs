@@ -23,14 +23,19 @@ fn main() {
     }
     #[cfg(not(unix))]
     {
-        // Ctrl+C in the tab reaches every process of the console: claude handles it, this one must outlive it.
+        // Ctrl+C in the tab, and the Ctrl+Break Hangar's close sends, reach every process of the console: claude
+        // handles them, this one must outlive them to hand back claude's exit code.
         #[cfg(windows)]
         unsafe {
             #[link(name = "kernel32")]
             extern "system" {
-                fn SetConsoleCtrlHandler(handler: usize, add: i32) -> i32;
+                fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(u32) -> i32>, add: i32) -> i32;
             }
-            SetConsoleCtrlHandler(0, 1);
+            unsafe extern "system" fn outlive(event: u32) -> i32 {
+                // CTRL_C_EVENT, CTRL_BREAK_EVENT: handled (ignored). Closing the window still ends this.
+                (event <= 1) as i32
+            }
+            SetConsoleCtrlHandler(Some(outlive), 1);
         }
         match c.status() {
             Ok(s) => std::process::exit(s.code().unwrap_or(1)),

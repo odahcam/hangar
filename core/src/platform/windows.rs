@@ -171,6 +171,32 @@ fn select_tab(pid: u32, window: isize) {
     }
 }
 
+// Ctrl+Break to the console `pid` is attached to, from a PowerShell helper (attaching to another console means
+// letting go of one's own). Claude Code takes it as a quit: it exits 0 and cleans up after itself, ending its remote
+// control session too, which TerminateProcess skips. The event reaches every process of that console; PowerShell
+// (5.1 and 7) and the resume helper outlive it. The helper itself may die of it: the event is sent by then.
+const CTRL_BREAK: &str = r#"
+Add-Type -Namespace Hangar -Name Brk -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern bool FreeConsole();
+[DllImport("kernel32.dll")] public static extern bool AttachConsole(uint pid);
+[DllImport("kernel32.dll")] public static extern bool GenerateConsoleCtrlEvent(uint ev, uint group);
+'@
+[void][Hangar.Brk]::FreeConsole()
+if (-not [Hangar.Brk]::AttachConsole([uint32]$env:HANGAR_BREAK_PID)) { exit 2 }
+[void][Hangar.Brk]::GenerateConsoleCtrlEvent(1, 0)
+"#;
+
+/// Asks the session `pid` to quit as Ctrl+Break would; false when that couldn't be sent.
+pub(crate) fn ctrl_break(pid: u32) -> bool {
+    let script: Vec<u8> = CTRL_BREAK.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut c = command("powershell.exe");
+    c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &base64(&script)])
+        .env("HANGAR_BREAK_PID", pid.to_string());
+    // Exit code 2: no console to attach to. Anything else, the event went out (the helper may die of it).
+    let r = run_with(&mut c, None, Duration::from_secs(10));
+    !r.missing && !r.err.starts_with("exit 2:")
+}
+
 fn base64(bytes: &[u8]) -> String {
     const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(bytes.len().div_ceil(3) * 4);

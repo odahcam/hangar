@@ -132,13 +132,22 @@ pub fn alive(pid: u32) -> bool {
     sys.process(p).is_some_and(|p| !matches!(p.status(), sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead))
 }
 
-/// SIGTERM where there are signals, so Claude Code can finish its writes; TerminateProcess on Windows.
+/// Asks the process to quit, so Claude Code can finish its writes and end its remote control session: SIGTERM where
+/// there are signals, Ctrl+Break to its console on Windows.
 pub fn terminate(pid: u32) {
     #[cfg(unix)]
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    if !crate::platform::windows::ctrl_break(pid) {
+        kill(pid);
+    }
+}
+
+/// Ends the process outright (TerminateProcess on Windows): for one that didn't quit when asked.
+#[cfg(windows)]
+pub fn kill(pid: u32) {
     {
         let mut sys = System::new();
         let p = Pid::from_u32(pid);

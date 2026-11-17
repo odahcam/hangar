@@ -85,8 +85,10 @@ function appendTurns(session, turns) {
 }
 
 // A "live" session: a real process registered the way Claude Code does in ~/.claude/sessions.
-function addLive(w, session) {
-  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 600e3)"], { stdio: "ignore" });
+// On Windows the session gets a console of its own, as in a terminal tab: closing it sends Ctrl+Break to its console,
+// which mustn't reach the test runner's. `code` is what it runs (by default, it just waits).
+function addLive(w, session, code = "setTimeout(() => {}, 600e3)") {
+  const child = spawn(process.execPath, ["-e", code], { stdio: "ignore", detached: WIN32, windowsHide: true });
   w.children.push(child);
   fs.writeFileSync(path.join(session.claude ?? w.claude, "sessions", child.pid + ".json"),
     JSON.stringify({ pid: child.pid, sessionId: session.id, cwd: session.cwd }));

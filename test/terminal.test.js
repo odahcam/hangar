@@ -279,9 +279,22 @@ test("on Windows resuming a session that is still running is refused instead of 
   assert.deepEqual(calls(w, "wt"), []);
 });
 
-test("on Windows closing a live session stops its process", { skip: !WIN32 }, async () => {
+// Asked with Ctrl+Break, as Claude Code quits cleanly on it (and ends its remote control session).
+test("on Windows closing a live session asks it to quit with Ctrl+Break", { skip: !WIN32 }, async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
-  const child = addLive(w, s);
+  const flag = path.join(w.root, "break");
+  const child = addLive(w, s, `process.on("SIGBREAK", () => { require("fs").writeFileSync(${JSON.stringify(flag)}, ""); process.exit(0); }); setTimeout(() => {}, 600e3)`);
+  srv = await startServer(w);
+  const r = await srv.api("POST", `/api/close/${s.id}`);
+  assert.deepEqual(r.json, { closed: true });
+  await waitFor(() => !alive(child.pid) || child.exitCode !== null || child.signalCode !== null);
+  assert.ok(fs.existsSync(flag), "quit on Ctrl+Break");
+  assert.equal((await srv.session(s.id)).live, null);
+});
+
+test("on Windows a session that ignores Ctrl+Break is ended anyway", { skip: !WIN32 }, async () => {
+  const s = addSession(w, { turns: [{ user: "a" }] });
+  const child = addLive(w, s, `process.on("SIGBREAK", () => {}); setTimeout(() => {}, 600e3)`);
   srv = await startServer(w);
   const r = await srv.api("POST", `/api/close/${s.id}`);
   assert.deepEqual(r.json, { closed: true });

@@ -311,6 +311,11 @@ impl Hangar {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+        // On Windows a session still there after Ctrl+Break is ended outright.
+        #[cfg(windows)]
+        if proc::alive(live.pid) {
+            proc::kill(live.pid);
+        }
         if let Some(tty) = &live.tty {
             self.platform.exit_tab(tty, false);
         }
