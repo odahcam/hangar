@@ -283,7 +283,7 @@ test("on Windows resuming a session that is still running is refused instead of 
 test("on Windows closing a live session asks it to quit with Ctrl+Break", { skip: !WIN32 }, async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
   const flag = path.join(w.root, "break");
-  const child = addLive(w, s, `process.on("SIGBREAK", () => { require("fs").writeFileSync(${JSON.stringify(flag)}, ""); process.exit(0); }); setTimeout(() => {}, 600e3)`);
+  const child = addLive(w, s, `process.on("SIGBREAK", () => { require("fs").writeFileSync(${JSON.stringify(flag)}, ""); process.exit(0); }); setTimeout(() => {}, 600e3)`, { console: true });
   srv = await startServer(w);
   const r = await srv.api("POST", `/api/close/${s.id}`);
   assert.deepEqual(r.json, { closed: true });
@@ -294,7 +294,7 @@ test("on Windows closing a live session asks it to quit with Ctrl+Break", { skip
 
 test("on Windows a session that ignores Ctrl+Break is ended anyway", { skip: !WIN32 }, async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
-  const child = addLive(w, s, `process.on("SIGBREAK", () => {}); setTimeout(() => {}, 600e3)`);
+  const child = addLive(w, s, `process.on("SIGBREAK", () => {}); setTimeout(() => {}, 600e3)`, { console: true });
   srv = await startServer(w);
   const r = await srv.api("POST", `/api/close/${s.id}`);
   assert.deepEqual(r.json, { closed: true });

@@ -85,10 +85,20 @@ function appendTurns(session, turns) {
 }
 
 // A "live" session: a real process registered the way Claude Code does in ~/.claude/sessions.
-// On Windows the session gets a console of its own, as in a terminal tab: closing it sends Ctrl+Break to its console,
-// which mustn't reach the test runner's. `code` is what it runs (by default, it just waits).
-function addLive(w, session, code = "setTimeout(() => {}, 600e3)") {
-  const child = spawn(process.execPath, ["-e", code], { stdio: "ignore", detached: WIN32, windowsHide: true });
+// `code` is what the session's process runs (by default, it just waits). With `console`, on Windows it gets a (hidden)
+// console of its own, as in a terminal tab: closing it sends Ctrl+Break to its console, which mustn't reach the test
+// runner's. (Node's `detached` gives no console at all there, so it's started by PowerShell.)
+function addLive(w, session, code = "setTimeout(() => {}, 600e3)", { console = false } = {}) {
+  let child;
+  if (console && WIN32) {
+    const file = path.join(w.root, `live-${session.id}.js`);
+    fs.writeFileSync(file, code);
+    const ps = `(Start-Process -FilePath '${process.execPath}' -ArgumentList '"${file}"' -WindowStyle Hidden -PassThru).Id`;
+    const pid = Number(execFileSync("powershell.exe", ["-NoProfile", "-Command", ps], { encoding: "utf8" }).trim());
+    child = { pid, exitCode: null, signalCode: null, kill() { try { process.kill(pid); } catch {} } };
+  } else {
+    child = spawn(process.execPath, ["-e", code], { stdio: "ignore" });
+  }
   w.children.push(child);
   fs.writeFileSync(path.join(session.claude ?? w.claude, "sessions", child.pid + ".json"),
     JSON.stringify({ pid: child.pid, sessionId: session.id, cwd: session.cwd }));
