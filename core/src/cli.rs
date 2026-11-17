@@ -1,6 +1,6 @@
 // Pairing from a command line, both ways: `Hangar --offer` prints a code from this machine (a member) and waits for a
-// machine to join with it; `Hangar --pair [code]` joins this machine with the member showing that code (read from
-// stdin when not given, so it stays out of the shell's history).
+// machine to join with it; `Hangar --pair` joins this machine with the member showing the code it reads from stdin
+// (never an argument, which the shell's history and other local users' ps would see).
 //
 // The running app does the work. The command writes its request in a reply file and starts the app again with the
 // file's path; the single instance plugin hands those arguments to the running app (or that launch becomes the app),
@@ -65,7 +65,6 @@ pub fn client() -> Option<i32> {
     attach_console();
     let req = match (cmd, argv.len()) {
         ("--offer", 2) => Request::Offer,
-        ("--pair", 3) => Request::Pair(argv[2].clone()),
         ("--pair", 2) => {
             let mut code = String::new();
             if std::io::stdin().read_line(&mut code).is_err() || code.trim().is_empty() {
@@ -75,7 +74,7 @@ pub fn client() -> Option<i32> {
             Request::Pair(code.trim().to_string())
         }
         _ => {
-            eprintln!("usage: Hangar --offer | Hangar --pair [code]");
+            eprintln!("usage: Hangar --offer | Hangar --pair (the code on stdin)");
             return Some(2);
         }
     };
