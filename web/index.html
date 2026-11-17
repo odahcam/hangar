@@ -349,9 +349,16 @@ function ago(iso) {
   const d = (Date.now() - new Date(iso)) / 864e5;
   return d < 1 ? t("today") : d < 2 ? t("yesterday") : t("daysAgo", { n: Math.floor(d) });
 }
+// `style` goes through the CSSOM: the desktop app's CSP puts a nonce in style-src, which makes the browser ignore
+// 'unsafe-inline', so a style attribute set as markup is dropped there (bars, dots and legends drawn blank).
 function el(tag, attrs = {}, kids = []) {
   const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) if (v !== false && v != null) k === "text" ? e.textContent = v : e.setAttribute(k, v);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === false || v == null) continue;
+    if (k === "text") e.textContent = v;
+    else if (k === "style") e.style.cssText = v;
+    else e.setAttribute(k, v);
+  }
   for (const k of [].concat(kids)) if (k) e.append(k);
   return e;
 }

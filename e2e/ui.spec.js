@@ -288,6 +288,21 @@ test("the Insights tab shows its panels", async () => {
   await expect(page.locator("#insights")).not.toContainText(/null|undefined|NaN|\[object/);
   await expect(page.locator("#insights .cols").first().locator(".c")).toHaveCount(30);
   await expect(page.locator("#insights .cols").nth(1).locator(".c")).toHaveCount(8);
+  // And the marks are drawn: sized and colored (the desktop app's CSP once dropped their style, leaving them blank).
+  const marks = await page.locator("#insights").evaluate((root) => {
+    const painted = (e) => getComputedStyle(e).backgroundColor !== "rgba(0, 0, 0, 0)";
+    const all = (sel) => [...root.querySelectorAll(sel)];
+    return {
+      bars: all(".track span").filter((e) => painted(e) && e.offsetWidth > 0).length,
+      columns: all(".cols .c span").filter((e) => painted(e) && e.offsetHeight > 0).length,
+      swatches: all(".legend i").length,
+      blankSwatches: all(".legend i").filter((e) => !painted(e)).length,
+    };
+  });
+  expect(marks.bars).toBeGreaterThan(0);
+  expect(marks.columns).toBeGreaterThan(0);
+  expect(marks.swatches).toBeGreaterThan(0);
+  expect(marks.blankSwatches).toBe(0);
 });
 
 test("an open session without a prompt yet shows no idle time in Insights", async () => {
