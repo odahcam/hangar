@@ -209,7 +209,7 @@ test("on Windows the tab opens under Windows Terminal's default profile", { skip
   const dir = path.join(w.root, "local", "Packages", "Microsoft.WindowsTerminal_8wekyb3d8bbwe", "LocalState");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "settings.json"),
-    '{\n  // the shell\n  "defaultProfile" : "{574e775e-4f2a-5b96-ac1e-a2962a402336}",\n  "profiles": { "defaults": {} }\n}\n');
+    '{\n  // "defaultProfile": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}",\n  "defaultProfile" : "{574e775e-4f2a-5b96-ac1e-a2962a402336}",\n  "profiles": { "defaults": {} }\n}\n');
   const s = addSession(w, { cwd: String.raw`C:\work\p`, turns: [{ user: "a" }] });
   srv = await startServer(w);
   assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { opened: true });

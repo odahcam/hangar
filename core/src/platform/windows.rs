@@ -97,7 +97,8 @@ impl Platform for Windows {
 }
 
 // The "defaultProfile" of Windows Terminal's settings (the Store build's, else Preview's, else the unpackaged one's).
-// The file allows comments, so the value is read as the first string after the key rather than parsed as JSON.
+// The file allows comments, so the value is read as the first string after the key rather than parsed as JSON; a key
+// behind "//" on its line is a comment's.
 fn default_profile() -> Option<String> {
     let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
     let files = [
@@ -106,7 +107,9 @@ fn default_profile() -> Option<String> {
         local.join(r"Microsoft\Windows Terminal\settings.json"),
     ];
     let text = files.iter().find_map(|f| std::fs::read_to_string(f).ok())?;
-    let rest = &text[text.find("\"defaultProfile\"")? + "\"defaultProfile\"".len()..];
+    const KEY: &str = "\"defaultProfile\"";
+    let at = text.match_indices(KEY).map(|(i, _)| i).find(|&i| !text[text[..i].rfind('\n').map_or(0, |n| n + 1)..i].contains("//"))?;
+    let rest = &text[at + KEY.len()..];
     let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
     Some(rest[..rest.find('"')?].to_string()).filter(|p| !p.is_empty() && !p.contains('\\'))
 }
