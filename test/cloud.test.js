@@ -88,9 +88,16 @@ async function hangar() {
   const w = makeWorld();
   worlds.push(w);
   const secrets = fs.mkdtempSync(path.join(w.root, "secrets-"));
-  const srv = await startServer(w, { HANGAR_TEST_CLOUD: "1", HANGAR_RELAY_URL: relayUrl, HANGAR_AUTH_ISSUER: issuerUrl, HANGAR_SECRETS_DIR: secrets });
-  servers.push(srv);
-  return { w, srv };
+  const env = { HANGAR_TEST_CLOUD: "1", HANGAR_RELAY_URL: relayUrl, HANGAR_AUTH_ISSUER: issuerUrl, HANGAR_SECRETS_DIR: secrets };
+  const h = { w, srv: await startServer(w, env) };
+  servers.push(h.srv);
+  // The same machine started over: its identity, sign-in and pin kept, its sessions with the others gone.
+  h.restart = async () => {
+    await h.srv.stop();
+    h.srv = await startServer(w, env);
+    servers.push(h.srv);
+  };
+  return h;
 }
 
 async function signIn(srv) {
@@ -145,4 +152,22 @@ test("the first machine roots the chain, the second pairs with a code, and one d
   // b logged it under a's device key.
   const { log } = (await b.srv.api("GET", "/api/remote")).json;
   assert.deepEqual(log.map((e) => [e.device, e.method]), [[sa.device, "PATCH"]]);
+
+  // b starts over: a's session to it is gone on b's side, and a learns it from the first frame b can't read. A read
+  // is sent again on a new session and answered; a change fails at once (it isn't repeated). Neither waits out the
+  // 20 s timeout.
+  const timed = async (f) => { const t = Date.now(); const r = await f(); return { r, ms: Date.now() - t }; };
+  const back = async () => {
+    await b.restart();
+    await until(b.srv, (s) => s.trust?.state === "member" && s.link.state === "online", "b to be back");
+  };
+  await back();
+  const read = await timed(() => call("GET", "/api/sessions"));
+  assert.ok(read.ms < 5000, `the read took ${read.ms} ms: ${read.r.text}`);
+  assert.deepEqual(read.r.json.map((s) => s.id), [session.id]);
+  await back();
+  const change = await timed(() => call("PATCH", `/api/session/${session.id}`, { note: "again" }));
+  assert.deepEqual(change.r.json, { error: "machine_reset" });
+  assert.ok(change.ms < 5000, `the change took ${change.ms} ms`);
+  assert.equal((await b.srv.session(session.id)).note, "from a");
 });
