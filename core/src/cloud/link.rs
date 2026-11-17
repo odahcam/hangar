@@ -24,6 +24,29 @@ const TICK: Duration = Duration::from_millis(200);
 /// How far the relay's clock may be from this machine's and still be what calls are timed by.
 const MAX_SKEW_MS: i64 = 120_000;
 
+/// How far the relay's clock (`now`, read while the proof `sent` was answered, `got`) is ahead of this one; 0 when
+/// it didn't say or is further than MAX_SKEW_MS.
+fn skew(now: Option<i64>, sent: i64, got: i64) -> i64 {
+    let s = now.map_or(0, |now| now.saturating_sub(sent / 2 + got / 2));
+    if s.unsigned_abs() <= MAX_SKEW_MS as u64 {
+        s
+    } else {
+        eprintln!("cloud: the relay's clock is {s} ms from this machine's; not used");
+        0
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_relay_clock_beyond_the_cap_is_not_used() {
+    assert_eq!(skew(Some(1_035_000), 1_000_000, 1_000_000), 35_000);
+    assert_eq!(skew(Some(1_000_000 - 120_000), 1_000_000, 1_000_000), -120_000);
+    assert_eq!(skew(None, 1_000_000, 1_000_000), 0);
+    for now in [1_000_000 + 120_001, i64::MIN, i64::MAX] {
+        assert_eq!(skew(Some(now), 1_000_000, 1_000_000), 0);
+    }
+}
+
 /// What leaves: a control message, or a frame for another device.
 pub enum Cmd {
     Text(Value),
@@ -151,14 +174,7 @@ fn session(auth: &Auth, identity: &Identity, handler: &dyn Handler, rx: &Receive
     // most half the round trip. A relay that doesn't say: no skew. The relay isn't trusted with the clock calls are
     // aged by beyond MAX_SKEW_MS: past that it's ignored, so a call it holds back arrives at most
     // MAX_CALL_AGE_MS + 2 × MAX_SKEW_MS late.
-    let got = chrono::Utc::now().timestamp_millis();
-    let skew = ready["now"].as_i64().map_or(0, |now| now.saturating_sub(sent / 2 + got / 2));
-    let skew = if skew.abs() <= MAX_SKEW_MS {
-        skew
-    } else {
-        eprintln!("cloud: the relay's clock is {skew} ms from this machine's; not used");
-        0
-    };
+    let skew = skew(ready["now"].as_i64(), sent, chrono::Utc::now().timestamp_millis());
     let chain: Vec<Entry> = serde_json::from_value(ready["chain"].clone()).map_err(fail)?;
     let online: Vec<String> = serde_json::from_value(ready["online"].clone()).unwrap_or_default();
     handler.state(LinkState::Online);

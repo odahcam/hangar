@@ -80,6 +80,21 @@ fn a_replayed_frame_ends_the_session_and_the_next_send_handshakes_again() {
     assert_eq!(got[0].2, b"three");
 }
 
+// The relay holding data back past the session's time plus its grace: refused by the receiver's own clock.
+#[test]
+fn data_on_a_session_past_its_time_ends_it() {
+    let (mut a, mut b) = (node(), node());
+    let m = members(&[&a, &b]);
+    let (da, db_) = (a.id.device(), b.id.device());
+    let out = a.peers.send(&m, &db_, b"one").unwrap();
+    pump(&mut a, &mut b, &m, out.into_iter().map(|o| (da.clone(), o)).collect());
+    let data = a.peers.send(&m, &db_, b"two").unwrap();
+    b.peers.age_sessions(std::time::Duration::from_secs(3600 + 121));
+    let (out, done) = b.peers.receive(&m, &da, &data[0].1);
+    assert!(done.is_empty());
+    assert_eq!(out[0].1[0], 4, "a reset");
+}
+
 #[test]
 fn frames_stamped_with_another_device_or_from_outside_the_chain_go_nowhere() {
     let (mut a, mut b, c) = (node(), node(), node());

@@ -92,6 +92,14 @@ impl Peers {
     }
 
     /// Drops every session with a device that is no longer a member.
+    /// For tests: every session started `by` earlier.
+    #[cfg(test)]
+    pub fn age_sessions(&mut self, by: Duration) {
+        for s in self.sessions.values_mut() {
+            s.started = s.started.checked_sub(by).expect("an Instant that far back");
+        }
+    }
+
     pub fn retain(&mut self, members: &Members) {
         self.sessions.retain(|(peer, _), _| members.contains_key(peer));
         self.mine.retain(|peer, _| members.contains_key(peer));
