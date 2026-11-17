@@ -123,6 +123,8 @@ async function startServer(w, env = {}) {
       HANGAR_WEB_DIR: path.join(ROOT, "web"),
       HANGAR_OSASCRIPT: path.join(BIN, "osascript.js"),
       HANGAR_WT: path.join(BIN, "wt.js"),
+      // Where Windows Terminal's settings are looked up: the world's, not the machine's.
+      LOCALAPPDATA: path.join(w.root, "local"),
       CLAUDE_BIN: path.join(BIN, "claude.js"),
       FAKE_LOG: w.log,
       FAKE_TABS: w.tabs,

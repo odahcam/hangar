@@ -53,9 +53,9 @@ impl Platform for Windows {
     }
 
     // A new tab in the most recent Windows Terminal window; without Windows Terminal, a console window of its own.
-    // The tab runs the helper's command line itself, no shell: no profile has it as its command, so Windows Terminal
-    // takes the user's default profile, whichever shell that is. wt splits its command line on ";", so each one is
-    // escaped. The tab closes when claude exits.
+    // The tab runs the helper's command line itself, no shell, under the user's default profile: given a command
+    // without -p, Windows Terminal takes the profiles' common settings ("Default", no icon) instead, so the default
+    // profile is named. wt splits its command line on ";", so each one is escaped. The tab closes when claude exits.
     fn open(&self, cwd: &str, argv: &[String]) -> Result<(), String> {
         let dir = cwd.replace(';', "\\;");
         let line: Vec<String> = argv.iter().map(|a| a.replace(';', "\\;")).collect();
@@ -64,7 +64,11 @@ impl Platform for Windows {
         for k in TERMINAL_ENV {
             wt.env_remove(k);
         }
-        wt.args(["-w", "0", "new-tab", "--startingDirectory", &dir]).args(&line);
+        wt.args(["-w", "0", "new-tab"]);
+        if let Some(p) = default_profile() {
+            wt.args(["-p", &p.replace(';', "\\;")]);
+        }
+        wt.args(["--startingDirectory", &dir]).args(&line);
         let r = run_with(&mut wt, None, Duration::from_secs(8));
         if !r.missing {
             return Ok(());
@@ -90,6 +94,21 @@ impl Platform for Windows {
     fn swap_used_mb(&self) -> f64 {
         win::pagefile_in_use_bytes().map_or(0.0, |b| b as f64 / 1048576.0)
     }
+}
+
+// The "defaultProfile" of Windows Terminal's settings (the Store build's, else Preview's, else the unpackaged one's).
+// The file allows comments, so the value is read as the first string after the key rather than parsed as JSON.
+fn default_profile() -> Option<String> {
+    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    let files = [
+        local.join(r"Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"),
+        local.join(r"Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json"),
+        local.join(r"Microsoft\Windows Terminal\settings.json"),
+    ];
+    let text = files.iter().find_map(|f| std::fs::read_to_string(f).ok())?;
+    let rest = &text[text.find("\"defaultProfile\"")? + "\"defaultProfile\"".len()..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    Some(rest[..rest.find('"')?].to_string()).filter(|p| !p.is_empty() && !p.contains('\\'))
 }
 
 // The terminal window a session runs in. The console the process is attached to decides: walking up from it, the

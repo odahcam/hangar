@@ -203,6 +203,20 @@ test("on Windows resuming a closed session opens a Windows Terminal tab running 
   assert.ok(resumed(w, s.id));
 });
 
+// Given a command without -p, Windows Terminal would take the profiles' common settings, so the tab names the
+// default profile from its settings (which may have comments).
+test("on Windows the tab opens under Windows Terminal's default profile", { skip: !WIN32 }, async () => {
+  const dir = path.join(w.root, "local", "Packages", "Microsoft.WindowsTerminal_8wekyb3d8bbwe", "LocalState");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "settings.json"),
+    '{\n  // the shell\n  "defaultProfile" : "{574e775e-4f2a-5b96-ac1e-a2962a402336}",\n  "profiles": { "defaults": {} }\n}\n');
+  const s = addSession(w, { cwd: String.raw`C:\work\p`, turns: [{ user: "a" }] });
+  srv = await startServer(w);
+  assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { opened: true });
+  assert.deepEqual(calls(w, "wt")[0].args.slice(0, 7),
+    ["-w", "0", "new-tab", "-p", "{574e775e-4f2a-5b96-ac1e-a2962a402336}", "--startingDirectory", String.raw`C:\work\p`]);
+});
+
 // No shell parses the account folder any more: quotes of any kind reach the helper as they are.
 test("on Windows an account folder with quotes reaches the helper as one argument", { skip: !WIN32 }, async () => {
   // (A double quote can't be in a Windows file name.)
