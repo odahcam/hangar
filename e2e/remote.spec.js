@@ -5,7 +5,8 @@ const { DARWIN, makeWorld, addSession, addLive, cleanup } = require("../test/hel
 const { launch } = require("./target");
 
 let w, srv;
-test.afterEach(async () => { await srv?.stop(); srv = null; cleanup(w); });
+// A skipped test (the desktop target) makes no world.
+test.afterEach(async () => { await srv?.stop(); srv = null; if (w) cleanup(w); w = null; });
 
 test("resuming a session of another machine says where it opens, and confirms it", async ({ page }) => {
   test.skip(test.info().project.name !== "web", "stands in for the relay over HTTP");

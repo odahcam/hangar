@@ -214,7 +214,7 @@ function cleanup(w) {
   // locked after that is left to the OS temp cleanup rather than failing the test. (The backoff is linear: 10 retries
   // wait up to ~14s in all; 60 would wait 7.6 minutes.)
   try { fs.rmSync(w.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }); }
-  catch (e) { if (e.code !== "EPERM" && e.code !== "EBUSY") throw e; }
+  catch (e) { if (!["EPERM", "EBUSY", "ENOTEMPTY"].includes(e.code)) throw e; }
 }
 
 async function waitFor(fn, { timeout = 10000, every = 100 } = {}) {
