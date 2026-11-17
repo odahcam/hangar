@@ -186,8 +186,14 @@ if (-not [Hangar.Brk]::AttachConsole([uint32]$env:HANGAR_BREAK_PID)) { exit 2 }
 [void][Hangar.Brk]::GenerateConsoleCtrlEvent(1, 0)
 "#;
 
-/// Asks the session `pid` to quit as Ctrl+Break would; false when that couldn't be sent.
+/// Asks the session `pid` to quit as Ctrl+Break would; false when that couldn't be sent. Never to a session on this
+/// process's own console (hangar-server started from a terminal, with the session beside it): the event would reach
+/// that terminal's shell and whatever it runs, which a script-running PowerShell takes as "break into the debugger".
 pub(crate) fn ctrl_break(pid: u32) -> bool {
+    let mine = win::console_host(std::process::id());
+    if mine.is_some() && mine == win::console_host(pid) {
+        return false;
+    }
     let script: Vec<u8> = CTRL_BREAK.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let mut c = command("powershell.exe");
     c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &base64(&script)])
