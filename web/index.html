@@ -196,11 +196,18 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
 .accts .dir { font: 11px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 .accts form { display: flex; gap: 6px; }
 .accts form input { flex: 1; }
+/* Another machine shown: said above everything, in the accent, with the way back at hand. */
+.remote-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 16px; padding: 10px 10px 10px 16px;
+  background: var(--accent); color: var(--bg); border-radius: 8px; font-size: 14px; }
+.remote-bar[hidden] { display: none; }
+.remote-bar .msg b { font-weight: 600; }
+.remote-bar .btn { background: var(--bg); color: var(--fg); border-color: transparent; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; background: var(--fg); color: var(--bg); font-size: 13px; padding: 8px 14px; border-radius: 6px; }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div class="remote-bar" id="remoteBanner" role="status" hidden><span class="msg"></span><button class="btn" id="remoteBack" data-i18n="showThisMachine"></button></div>
   <header>
     <h1>Hangar</h1>
     <span class="counts" id="counts" data-i18n="loading"></span>
@@ -208,7 +215,6 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
     <select id="locale" data-i18n-label="language"><option value="en">English</option><option value="pt">Português</option></select>
     <button class="btn" id="settingsBtn" data-i18n-label="settings">⚙</button>
   </header>
-  <div class="warn-box" id="remoteBanner" hidden></div>
   <div class="tiles" id="tiles"></div>
   <nav id="tabs">
     <button data-v="pending" data-i18n="tabPending"></button>
@@ -274,6 +280,8 @@ function showView(v) {
 // through the relay. Only what that machine lets a paired device do goes there (see core/src/remote.rs); everything
 // else, settings included, stays on this machine.
 let cloud = null, remote = null, machine = "", machineNames = {};
+/** The machine whose sessions were asked for after a switch and haven't come yet (the list shows that it's loading). */
+let loadingFrom = null;
 try { machine = localStorage.getItem("machine") || ""; } catch {}
 const REMOTE_OK = /^(GET \/api\/(sessions|accounts|machine)$|PATCH \/api\/session\/|POST \/api\/(order$|resume\/|close\/|dismiss-suggestion\/))/;
 // With another machine shown, anything outside that list is refused here rather than run on this machine: the
@@ -390,14 +398,17 @@ function render() {
   $("#tabs").hidden = set; $("#tiles").hidden = set || !!machine; $("#checkNow").hidden = view !== "pending" || !!machine;
   $("#tabs [data-v=insights]").hidden = !!machine;
   $("#remoteBanner").hidden = !machine || set;
-  if (machine) $("#remoteBanner").textContent = t("controlling", { name: machineName(machine) });
+  if (machine) {
+    const [before, after = ""] = t("controlling", { name: "\0" }).split("\0");
+    $("#remoteBanner .msg").replaceChildren(before, el("b", { text: machineName(machine) }), after);
+  }
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-pressed", b.dataset.v === view);
   $("#settingsBtn").setAttribute("aria-pressed", set);
   if (ins || set) $("#empty").hidden = true;
   if (ins) return loadInsights();
   // Settings are this machine's: with another one shown, its accounts aren't listed here as if they could be edited.
   const local = machine ? [panel(t("pAccounts"), "", [el("div", { class: "meta", text: t("settingsLocalOnly", { name: machineName(machine) }) }),
-    el("div", {}, [btn(t("showThisMachine"), "", () => { $("#machine").value = ""; $("#machine").onchange({ target: $("#machine") }); })])])] : [accountsPanel(), classifierSettings()];
+    el("div", {}, [btn(t("showThisMachine"), "", showThisMachine)])])] : [accountsPanel(), classifierSettings()];
   if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), ...local, cloudPanel(), remotePanel());
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
   const acct = multi() ? $("#acct").value : "";
@@ -427,7 +438,7 @@ function render() {
   $("#split").classList.toggle("detail-open", detailOpen && !!sel);
   $("#split").classList.toggle("none", !list.length);
   $("#empty").hidden = list.length > 0;
-  $("#empty").textContent = view === "pending" ? t("emptyPending") : t("emptyDone");
+  $("#empty").textContent = loadingFrom ? t("loadingFrom", { name: machineName(loadingFrom) }) : view === "pending" ? t("emptyPending") : t("emptyDone");
   const n = (f) => items.filter(f).length;
   $("#counts").textContent = t("counts", {
     pending: n((s) => isHead(s) && s.status !== "done"), suggested: n((s) => s.suggestion), untriaged: n((s) => isHead(s) && s.priority == null && s.status !== "done"),
@@ -453,24 +464,53 @@ const shortProject = (p) => (p || "?").split(/[\\/]/).filter(Boolean).slice(-2).
 const familyOf = (s) => s.family ? items.filter((x) => x.family === s.family).sort((a, b) => (b.lastAt || "").localeCompare(a.lastAt || "")) : [s];
 // Brings a running session's terminal forward, or opens it in a new one. On another machine that happens on its
 // screen, not this one: the button says where, and a toast confirms it, since nothing opens here.
+// Opening or closing a session settles a moment after the call returns: the process has to start (and register
+// itself) or quit, on this machine or another. Until the list shows it open (or closed), up to SETTLE_MS, the
+// session's button stays busy, through the renders that happen meanwhile.
+const SETTLE_MS = 10000;
+const settling = new Map(); // session id → { label, open }: the busy label, and whether it's opening or closing
+async function settle(s, label, call, open, ok) {
+  settling.set(s.id, { label, open });
+  render();
+  try {
+    await call();
+    if (ok) toast(ok);
+    for (const end = Date.now() + SETTLE_MS; Date.now() < end;) {
+      await load();
+      if (!!byId(s.id)?.live === open) break;
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  } catch (e) { toast(failed(e)); await load(); }
+  settling.delete(s.id);
+  render();
+}
+// While a session settles, the button of what's under way says so; the other one waits, disabled.
+function settlingBtn(b, s, open) {
+  const st = settling.get(s.id);
+  if (!st) return b;
+  b.disabled = true;
+  if (st.open === open) { b.textContent = st.label; b.setAttribute("aria-busy", "true"); }
+  return b;
+}
 function resumeBtn(s) {
+  return settlingBtn(resumeBtnOf(s), s, true);
+}
+function resumeBtnOf(s) {
   if (machine) {
     const name = machineName(machine);
-    const b = btn(t(s.live ? "goToTabOn" : "resumeOn", { name }), "primary",
-      () => pending(b, t("openingOn", { name }), () => api("POST", `/api/resume/${s.id}`), t("openedOn", { name })));
-    return b;
+    return btn(t(s.live ? "goToTabOn" : "resumeOn", { name }), "primary",
+      () => settle(s, t("openingOn", { name }), () => api("POST", `/api/resume/${s.id}`), true, t("openedOn", { name })));
   }
-  const b = btn(s.live ? t("goToTab") : t("resume"), "primary", () => pending(b, t("opening"), () => api("POST", `/api/resume/${s.id}`)));
-  return b;
+  return btn(s.live ? t("goToTab") : t("resume"), "primary", () => settle(s, t("opening"), () => api("POST", `/api/resume/${s.id}`), true));
 }
 function closeBtn(s) {
   let disarm;
   const b = btn(t("close"), "danger", () => {
     if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = t("confirmClose"); disarm = setTimeout(() => { b.classList.remove("armed"); b.textContent = t("close"); }, 3000); return; }
     clearTimeout(disarm);
-    pending(b, t("closing"), () => api("POST", `/api/close/${s.id}`), t("sessionClosed"));
+    settle(s, t("closing"), () => api("POST", `/api/close/${s.id}`), false, t("sessionClosed"));
   });
-  return b;
+  return settlingBtn(b, s, false);
 }
 
 // A line of the index: place, title (×n when the conversation spans sessions), project and the signs worth seeing
@@ -593,8 +633,10 @@ function overview() {
   const d = lastInsights;
   const head = el("div", { class: "d-head" }, [
     el("div", { class: "d-title" }, [el("h2", { text: t("overviewTitle") }), el("div", { class: "muted", text: t("overviewSub") })]),
-    btn(t("allInsights"), "", () => showView("insights")),
+    // Insights are this machine's: with another one shown there are none of its to point to.
+    machine ? null : btn(t("allInsights"), "", () => showView("insights")),
   ]);
+  if (machine) return [head];
   if (!d) return [head, el("div", { class: "muted", text: t("loading") })];
   const section = (title, sub, kids) => el("div", { class: "block" }, [el("div", { class: "k" }, [title, sub ? el("small", { text: " · " + sub }) : null]), ...kids]);
 
@@ -603,7 +645,7 @@ function overview() {
   const maxMb = Math.max(1, ...open.map((s) => s.mb));
   const memRows = open.map((s) => {
     const r = hbar([acctDot(s.account), (s.idleHours >= 24 ? "◌ " : "") + s.title], [seg(s.mb, maxMb, s.idleHours >= 24 ? "--age1" : "--s1", `${s.mb} MB`)],
-      `${s.mb} MB · ${s.idleHours}h`, s.idleHours >= 24 ? t("idleFor", { h: s.idleHours }) : "");
+      `${s.mb} MB · ${s.idleHours == null ? "—" : s.idleHours + "h"}`, s.idleHours >= 24 ? t("idleFor", { h: s.idleHours }) : "");
     // A line of this list opens its session, when the list has it.
     if (byId(s.id)) { r.classList.add("pick"); r.onclick = () => select(s.id); }
     return r;
@@ -959,7 +1001,8 @@ async function loadInsights() {
   const memRows = m.sessions.map((s) => {
     const idle = s.idleHours >= 24;
     return hbar([acctDot(s.account), `${idle ? "◌ " : ""}${s.title}`], [seg(s.mb, maxMb, idle ? "--age1" : "--s1", `${s.mb} MB`)],
-      `${s.mb} MB · ${s.idleHours}h`, idle ? t("idleFor", { h: s.idleHours }) : "");
+      // No prompt yet: no idle time to tell.
+      `${s.mb} MB · ${s.idleHours == null ? "—" : s.idleHours + "h"}`, idle ? t("idleFor", { h: s.idleHours }) : "");
   });
   const idleCount = m.sessions.filter((s) => s.idleHours >= 24).length;
   const idleMb = m.sessions.filter((s) => s.idleHours >= 24).reduce((a, s) => a + s.mb, 0);
@@ -1032,14 +1075,24 @@ async function loadInsights() {
   );
 }
 
+// Each load has a generation: only the latest one's answer is shown, so a slow machine's list can't land over the
+// machine picked after it.
+let loadGen = 0;
 async function load() {
-  const was = machine;
-  try { [items, accounts, classifier] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts"), machine ? null : api("GET", "/api/classifier"), loadCloud()]); } catch (e) {
-    $("#counts").textContent = machine ? t("machineDown", { name: machineName(machine), msg: failed(e) }) : t("serverDown", { msg: e.message });
+  const was = machine, gen = ++loadGen;
+  let got;
+  try { got = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts"), machine ? null : api("GET", "/api/classifier"), loadCloud()]); } catch (e) {
+    if (gen !== loadGen) return;
+    const msg = machine ? t("machineDown", { name: machineName(machine), msg: failed(e) }) : t("serverDown", { msg: e.message });
+    $("#counts").textContent = msg;
+    if (loadingFrom) { loadingFrom = null; render(); $("#empty").textContent = msg; }
     return;
   }
+  if (gen !== loadGen) return;
   // The machine shown went away from the account meanwhile: show this one's sessions instead.
   if (machine !== was) return load();
+  [items, accounts, classifier] = got;
+  loadingFrom = null;
   const sel = $("#proj"), cur = sel.value;
   sel.replaceChildren(el("option", { value: "", text: t("allProjects") }), ...[...new Set(items.map((s) => s.project).filter(Boolean))].sort().map((p) => el("option", { value: p, text: p })));
   sel.value = cur;
@@ -1053,13 +1106,22 @@ async function load() {
   if (focused) document.getElementById(focused)?.focus();
 }
 
-$("#machine").onchange = (e) => {
-  machine = e.target.value;
+// Switching machines empties the list at once and says whose sessions are on their way: nothing of the machine left
+// stays on screen while the next one answers (see load's generation).
+function switchMachine(next) {
+  machine = next;
+  $("#machine").value = next;
   try { machine ? localStorage.setItem("machine", machine) : localStorage.removeItem("machine"); } catch {}
   selectedId = null;
-  if (machine && view === "insights") showView("pending");
+  items = [];
+  loadingFrom = machine || null;
+  if (machine && view === "insights") return showView("pending"), load();
+  render();
   load();
-};
+}
+const showThisMachine = () => switchMachine("");
+$("#machine").onchange = (e) => switchMachine(e.target.value);
+$("#remoteBack").onclick = showThisMachine;
 // Pairing and sign-in move on their own (a code typed elsewhere, a browser coming back): Settings follows them.
 setInterval(async () => {
   if (view !== "settings" || document.hidden) return;
