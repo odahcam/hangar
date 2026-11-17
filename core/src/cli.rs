@@ -24,6 +24,8 @@ const OFFER_WAIT: Duration = Duration::from_secs(300);
 /// How long the link may take to be online with the chain seen.
 const READY_WAIT: Duration = Duration::from_secs(30);
 const PAIR_WAIT: Duration = Duration::from_secs(60);
+/// How long an accepted code's device may take to be in the chain.
+const ADD_WAIT: Duration = Duration::from_secs(15);
 
 enum Request {
     Offer,
@@ -79,7 +81,7 @@ pub fn client() -> Option<i32> {
         }
     };
     let wait = match req {
-        Request::Offer => OFFER_WAIT + READY_WAIT,
+        Request::Offer => OFFER_WAIT + ADD_WAIT + READY_WAIT,
         Request::Pair(_) => PAIR_WAIT + READY_WAIT,
     };
     Some(run_client(cmd, &req, wait))
@@ -220,12 +222,20 @@ fn answer(hangar: &Hangar, req: Request, say: &mut dyn FnMut(&str)) -> Result<()
         Request::Offer => {
             let code = cloud.offer()?;
             say(&code);
-            wait(OFFER_WAIT, || {
+            let mut gone: Option<Instant> = None;
+            wait(OFFER_WAIT + ADD_WAIT, || {
                 let s = status();
                 if let Some(d) = s["joined"].as_str() {
                     return Some(Ok(d.to_string()));
                 }
-                s["offer"].is_null().then(|| Err("code_expired".to_string()))
+                // An accepted code stops being shown before its device is in the chain: only a code gone for a while
+                // without anyone joined has expired.
+                if !s["offer"].is_null() {
+                    gone = None;
+                    return None;
+                }
+                let since = *gone.get_or_insert_with(Instant::now);
+                (since.elapsed() >= ADD_WAIT).then(|| Err("code_expired".to_string()))
             })
             .unwrap_or(Err("code_expired".into()))
             .map(|d| say(&format!("joined: {d}")))
