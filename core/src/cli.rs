@@ -1,10 +1,13 @@
 // Pairing from a command line, both ways: `Hangar --offer` prints a code from this machine (a member) and waits for a
-// machine to join with it; `Hangar --pair <code>` joins this machine with the member showing that code.
+// machine to join with it; `Hangar --pair [code]` joins this machine with the member showing that code (read from
+// stdin when not given, so it stays out of the shell's history).
 //
-// The running app does the work. The command starts the app again with its request and a reply file; the single
-// instance plugin hands those arguments to the running app (or that launch becomes the app), which answers in the
-// file, one JSON line at a time: {"say": text} to print, {"exit": code} to end. Only a local process can pass
-// arguments, unlike a hangar:// link, which any web page can open.
+// The running app does the work. The command writes its request in a reply file and starts the app again with the
+// file's path; the single instance plugin hands those arguments to the running app (or that launch becomes the app),
+// which reads the request from the file and answers below it, one JSON line at a time: {"say": text} to print,
+// {"exit": code} to end. The code never travels in arguments, which other local users can see (ps, and on macOS the
+// plugin's socket in /tmp). Only a local process can pass arguments, unlike a hangar:// link, which any web page
+// can open.
 use crate::Hangar;
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
@@ -27,11 +30,28 @@ enum Request {
     Pair(String),
 }
 
-fn request(argv: &[String]) -> Option<Request> {
-    match argv.get(1)?.as_str() {
-        "--offer" => Some(Request::Offer),
-        "--pair" => Some(Request::Pair(argv.get(2)?.clone())),
-        _ => None,
+/// The pairing command a launch's arguments name, if any.
+fn command(argv: &[String]) -> Option<&'static str> {
+    ["--offer", "--pair"].into_iter().find(|c| argv.get(1).is_some_and(|a| a == c))
+}
+
+impl Request {
+    fn line(&self) -> String {
+        match self {
+            Request::Offer => json!({ "offer": true }),
+            Request::Pair(code) => json!({ "pair": code }),
+        }
+        .to_string()
+    }
+
+    /// The request in the reply file's first line, for the command the arguments name.
+    fn parse(command: &str, line: &str) -> Option<Request> {
+        let v: Value = serde_json::from_str(line).ok()?;
+        match command {
+            "--offer" if v["offer"] == true => Some(Request::Offer),
+            "--pair" => Some(Request::Pair(v["pair"].as_str()?.to_string())),
+            _ => None,
+        }
     }
 }
 
@@ -41,19 +61,32 @@ pub fn client() -> Option<i32> {
     if argv.iter().any(|a| a == REPLY) {
         return None;
     }
-    if argv.get(1).is_some_and(|a| a == "--pair") && argv.len() != 3 || argv.get(1).is_some_and(|a| a == "--offer") && argv.len() != 2 {
-        eprintln!("usage: Hangar --offer | Hangar --pair <code>");
-        return Some(2);
-    }
-    let req = request(&argv)?;
+    let cmd = command(&argv)?;
     attach_console();
-    Some(run_client(&argv[1..], match req {
+    let req = match (cmd, argv.len()) {
+        ("--offer", 2) => Request::Offer,
+        ("--pair", 3) => Request::Pair(argv[2].clone()),
+        ("--pair", 2) => {
+            let mut code = String::new();
+            if std::io::stdin().read_line(&mut code).is_err() || code.trim().is_empty() {
+                eprintln!("hangar: no code on stdin");
+                return Some(2);
+            }
+            Request::Pair(code.trim().to_string())
+        }
+        _ => {
+            eprintln!("usage: Hangar --offer | Hangar --pair [code]");
+            return Some(2);
+        }
+    };
+    let wait = match req {
         Request::Offer => OFFER_WAIT + READY_WAIT,
         Request::Pair(_) => PAIR_WAIT + READY_WAIT,
-    }))
+    };
+    Some(run_client(cmd, &req, wait))
 }
 
-fn run_client(args: &[String], wait: Duration) -> i32 {
+fn run_client(cmd: &str, req: &Request, wait: Duration) -> i32 {
     let mut id = [0u8; 16];
     if getrandom::fill(&mut id).is_err() {
         eprintln!("hangar: no random source");
@@ -61,14 +94,17 @@ fn run_client(args: &[String], wait: Duration) -> i32 {
     }
     let name: String = id.iter().map(|b| format!("{b:02x}")).collect();
     let path = std::env::temp_dir().join(format!("{PREFIX}{name}.jsonl"));
-    let Ok(mut file) = OpenOptions::new().write(true).create_new(true).open(&path).and_then(|_| File::open(&path)) else {
+    let first = format!("{}\n", req.line());
+    let created = OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut f| f.write_all(first.as_bytes()));
+    let Ok(mut file) = created.and_then(|_| File::open(&path)) else {
         eprintln!("hangar: can't create {}", path.display());
+        let _ = std::fs::remove_file(&path);
         return 1;
     };
     let code = (|| {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         Command::new(exe)
-            .args(args)
+            .arg(cmd)
             .arg(REPLY)
             .arg(&path)
             .stdin(Stdio::null())
@@ -76,7 +112,7 @@ fn run_client(args: &[String], wait: Duration) -> i32 {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| e.to_string())?;
-        let (start, mut at, mut partial) = (Instant::now(), 0u64, String::new());
+        let (start, mut at, mut partial) = (Instant::now(), first.len() as u64, String::new());
         while start.elapsed() < wait {
             std::thread::sleep(Duration::from_millis(250));
             let mut chunk = String::new();
@@ -135,14 +171,23 @@ fn reply_file(argv: &[String]) -> Option<File> {
     if p.parent()?.canonicalize().ok()? != tmp || !std::fs::symlink_metadata(&p).ok()?.is_file() {
         return None;
     }
-    OpenOptions::new().append(true).open(&p).ok()
+    OpenOptions::new().read(true).append(true).open(&p).ok()
+}
+
+/// The reply file and the request in its first line.
+fn read_request(cmd: &str, argv: &[String]) -> Option<(File, Request)> {
+    let mut f = reply_file(argv)?;
+    let mut text = String::new();
+    (&mut f).take(4096).read_to_string(&mut text).ok()?;
+    let req = Request::parse(cmd, text.lines().next()?)?;
+    Some((f, req))
 }
 
 /// In the running app, for the arguments a launch handed over: true when they were a pairing request, answered on a
 /// thread of its own.
 pub fn serve(hangar: &Arc<Hangar>, argv: &[String]) -> bool {
-    let Some(req) = request(argv) else { return false };
-    let Some(mut out) = reply_file(argv) else { return true };
+    let Some(cmd) = command(argv) else { return false };
+    let Some((mut out, req)) = read_request(cmd, argv) else { return true };
     let hangar = Arc::clone(hangar);
     std::thread::spawn(move || {
         let mut say = |v: Value| {
@@ -240,11 +285,20 @@ mod tests {
         std::fs::remove_file(&ok).unwrap();
     }
 
+    // The code comes from the reply file, never from the arguments.
     #[test]
     fn requests() {
-        assert!(matches!(request(&args(&["h", "--offer"])), Some(Request::Offer)));
-        assert!(matches!(request(&args(&["h", "--pair", "ABC123"])), Some(Request::Pair(c)) if c == "ABC123"));
-        assert!(request(&args(&["h", "--pair"])).is_none());
-        assert!(request(&args(&["h", "hangar://auth/callback?x"])).is_none());
+        assert_eq!(command(&args(&["h", "--pair", REPLY, "f"])), Some("--pair"));
+        assert_eq!(command(&args(&["h", "hangar://auth/callback?x --pair"])), None);
+        let pair = Request::Pair("ABC123".into()).line();
+        assert!(matches!(Request::parse("--pair", &pair), Some(Request::Pair(c)) if c == "ABC123"));
+        assert!(Request::parse("--offer", &pair).is_none());
+        assert!(matches!(Request::parse("--offer", &Request::Offer.line()), Some(Request::Offer)));
+
+        let path = std::env::temp_dir().join(format!("{PREFIX}{}.jsonl", "ef".repeat(16)));
+        std::fs::write(&path, format!("{pair}\n")).unwrap();
+        let read = read_request("--pair", &args(&["h", "--pair", REPLY, path.to_str().unwrap()]));
+        assert!(matches!(read, Some((_, Request::Pair(c))) if c == "ABC123"));
+        std::fs::remove_file(&path).unwrap();
     }
 }
