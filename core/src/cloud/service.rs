@@ -22,9 +22,19 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// What a waiting call gets: the reply, or word that the session it went on ended without one (the other machine
+/// restarted, or dropped a session this one still took for live).
+enum Answer {
+    Reply(Reply),
+    Lost,
+}
+
+/// A call waiting for its answer, and the session it went on.
+type Waiting = (Sender<Answer>, Option<[u8; 8]>);
 /// How old (or how far ahead) a call may be when it arrives, both machines timing it by the relay's clock.
 const MAX_CALL_AGE_MS: i64 = 60_000;
 /// Calls from one device handled at once; more are refused, not queued.
@@ -70,8 +80,9 @@ pub struct Cloud {
     view: Mutex<View>,
     peers: Mutex<Peers>,
     out: Sender<Cmd>,
-    /// Pending calls by (device called, id): a reply only counts from the device it was asked of.
-    calls: Mutex<HashMap<(String, u64), Sender<Reply>>>,
+    /// Pending calls by (device called, id), with the session each went on: a reply only counts from the device it
+    /// was asked of.
+    calls: Mutex<HashMap<(String, u64), Waiting>>,
     next_id: AtomicU64,
     /// Calls being answered, per calling device.
     busy: Mutex<HashMap<String, usize>>,
@@ -190,28 +201,43 @@ impl Cloud {
             "joining": lock(&self.join).as_ref().is_some_and(|j| j.live()), "joinRefused": self.join_refused.load(Ordering::SeqCst), "joined": *lock(&self.joined) })
     }
 
-    /// Calls `method path` on another machine of the account and waits for its reply.
+    /// Calls `method path` on another machine of the account and waits for its reply. A call whose session ends
+    /// without a reply fails then, not at the timeout; a GET is sent once more, on a new session (a change may have
+    /// been made before the reply was lost, so only a read is repeated).
     pub fn call(&self, device: &str, method: &str, path: &str, body: &str) -> Reply {
         let err = |status: u16, e: &str| Reply { status, body: json!({ "error": e }) };
         let members = self.members();
         if !members.contains_key(device) || device == self.identity.device() {
             return err(404, "unknown_machine");
         }
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let key = (device.to_string(), id);
-        let (tx, rx) = mpsc::channel();
-        lock(&self.calls).insert(key.clone(), tx);
-        let msg = json!({ "id": id, "at": self.relay_now(), "m": method, "p": path, "b": body }).to_string();
-        let sent = lock(&self.peers).send(&members, device, msg.as_bytes());
-        let reply = match sent {
-            Ok(frames) => {
-                self.send(frames);
-                rx.recv_timeout(CALL_TIMEOUT).unwrap_or_else(|_| err(504, "machine_timeout"))
+        let deadline = Instant::now() + CALL_TIMEOUT;
+        let mut tries = if method == "GET" { 2 } else { 1 };
+        loop {
+            tries -= 1;
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            let key = (device.to_string(), id);
+            let (tx, rx) = mpsc::channel();
+            let msg = json!({ "id": id, "at": self.relay_now(), "m": method, "p": path, "b": body }).to_string();
+            let sent = {
+                let mut peers = lock(&self.peers);
+                peers.send(&members, device, msg.as_bytes()).map(|frames| (frames, peers.mine(device)))
+            };
+            let answer = match sent {
+                Ok((frames, sid)) => {
+                    lock(&self.calls).insert(key.clone(), (tx, sid));
+                    self.send(frames);
+                    rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok()
+                }
+                Err(e) => return err(502, &e),
+            };
+            lock(&self.calls).remove(&key);
+            match answer {
+                Some(Answer::Reply(r)) => return r,
+                Some(Answer::Lost) if tries > 0 => continue,
+                Some(Answer::Lost) => return err(502, "machine_reset"),
+                None => return err(504, "machine_timeout"),
             }
-            Err(e) => err(502, &e),
-        };
-        lock(&self.calls).remove(&key);
-        reply
+        }
     }
 
     /// Sets trust from a verified state: a member only with its own device and Noise keys in it.
@@ -598,14 +624,23 @@ impl Handler for Cloud {
             return self.on_pairing(&from, &payload);
         }
         let members = self.members();
-        let (out, done) = lock(&self.peers).receive(&members, &from, &payload);
+        let (out, done, ended) = lock(&self.peers).receive(&members, &from, &payload);
         self.send(out);
+        if let Some(sid) = ended {
+            let mut calls = lock(&self.calls);
+            let lost: Vec<_> = calls.iter().filter(|((d, _), (_, s))| *d == from && *s == Some(sid)).map(|(k, _)| k.clone()).collect();
+            for k in lost {
+                if let Some((tx, _)) = calls.remove(&k) {
+                    let _ = tx.send(Answer::Lost);
+                }
+            }
+        }
         for i in done {
             let Ok(msg) = serde_json::from_slice::<Value>(&i.message) else { continue };
             if i.mine {
                 // On the session we started: only a reply, from the device we called, to a call still waiting.
-                if let Some(tx) = msg["id"].as_u64().and_then(|id| lock(&self.calls).remove(&(from.clone(), id))) {
-                    let _ = tx.send(Reply { status: msg["s"].as_u64().unwrap_or(502) as u16, body: msg["b"].clone() });
+                if let Some((tx, _)) = msg["id"].as_u64().and_then(|id| lock(&self.calls).remove(&(from.clone(), id))) {
+                    let _ = tx.send(Answer::Reply(Reply { status: msg["s"].as_u64().unwrap_or(502) as u16, body: msg["b"].clone() }));
                 }
             } else if let Some(me) = self.me.upgrade() {
                 // On the peer's session: only a call, answered as that device.

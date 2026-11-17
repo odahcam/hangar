@@ -34,7 +34,7 @@ fn pump(a: &mut Node, b: &mut Node, m: &Members, frames: Vec<(String, Out)>) -> 
     let mut frames: std::collections::VecDeque<_> = frames.into();
     while let Some((from, (to, f))) = frames.pop_front() {
         let n = if to == a.id.device() { &mut *a } else { &mut *b };
-        let (out, done) = n.peers.receive(m, &from, &f);
+        let (out, done, _) = n.peers.receive(m, &from, &f);
         let me = n.id.device();
         got.extend(done.into_iter().map(|i| (me.clone(), i.sid, i.message)));
         frames.extend(out.into_iter().map(|o| (me.clone(), o)));
@@ -90,9 +90,36 @@ fn data_on_a_session_past_its_time_ends_it() {
     pump(&mut a, &mut b, &m, out.into_iter().map(|o| (da.clone(), o)).collect());
     let data = a.peers.send(&m, &db_, b"two").unwrap();
     b.peers.age_sessions(std::time::Duration::from_secs(3600 + 121));
-    let (out, done) = b.peers.receive(&m, &da, &data[0].1);
+    let (out, done, _) = b.peers.receive(&m, &da, &data[0].1);
     assert!(done.is_empty());
     assert_eq!(out[0].1[0], 4, "a reset");
+    // And a learns that what it sent on that session gets no reply.
+    let (_, _, ended) = a.peers.receive(&m, &db_, &out[0].1);
+    assert_eq!(ended, a_sid(&data));
+}
+
+fn a_sid(frames: &[Out]) -> Option<[u8; 8]> {
+    Some(frames[0].1[1..9].try_into().unwrap())
+}
+
+#[test]
+fn a_peer_that_restarted_ends_the_session_it_no_longer_knows() {
+    let (mut a, mut b) = (node(), node());
+    let m = members(&[&a, &b]);
+    let (da, db_) = (a.id.device(), b.id.device());
+    let out = a.peers.send(&m, &db_, b"one").unwrap();
+    pump(&mut a, &mut b, &m, out.into_iter().map(|o| (da.clone(), o)).collect());
+    // b starts over with the same keys and no sessions.
+    b.peers = Peers::new(db_.clone(), b.id.dh_private());
+    let data = a.peers.send(&m, &db_, b"two").unwrap();
+    let (out, _, _) = b.peers.receive(&m, &da, &data[0].1);
+    let (_, _, ended) = a.peers.receive(&m, &db_, &out[0].1);
+    assert_eq!(ended, a_sid(&data));
+    assert_eq!(a.peers.mine(&db_), None);
+    // The next send starts a new session, which b takes.
+    let out = a.peers.send(&m, &db_, b"three").unwrap();
+    let got = pump(&mut a, &mut b, &m, out.into_iter().map(|o| (da.clone(), o)).collect());
+    assert_eq!(got[0].2, b"three");
 }
 
 #[test]
@@ -106,7 +133,7 @@ fn frames_stamped_with_another_device_or_from_outside_the_chain_go_nowhere() {
     assert!(got.is_empty());
     // b no longer counts a as a member: a's frames are dropped before any crypto.
     let without_a = members(&[&b, &c]);
-    let (replies, done) = b.peers.receive(&without_a, &da, &out[0].1);
+    let (replies, done, _) = b.peers.receive(&without_a, &da, &out[0].1);
     assert!(replies.is_empty() && done.is_empty());
     // And a can't open a session to a device outside the chain.
     assert_eq!(a.peers.send(&members(&[&a]), &db_, b"x").unwrap_err(), "not_member");
@@ -121,7 +148,7 @@ fn a_handshake_reusing_my_session_id_is_not_taken_as_the_peers() {
     // b starts its own session to a, and the relay rewrites b's session id to a's.
     let mut theirs = b.peers.send(&m, &da, b"yo").unwrap();
     theirs[0].1[1..9].copy_from_slice(&out[0].1[1..9]);
-    let (replies, _) = a.peers.receive(&m, &db_, &theirs[0].1);
+    let (replies, _, _) = a.peers.receive(&m, &db_, &theirs[0].1);
     assert!(replies.is_empty());
     // a's own session still completes.
     let got = pump(&mut a, &mut b, &m, out.into_iter().map(|o| (da.clone(), o)).collect());
@@ -136,7 +163,7 @@ fn messages_say_which_session_they_came_on() {
     let mut frames: std::collections::VecDeque<(String, Out)> = a.peers.send(&m, &db_, b"call").unwrap().into_iter().map(|o| (da.clone(), o)).collect();
     let mut seen = vec![];
     while let Some((from, (to, f))) = frames.pop_front() {
-        let (out, done) = if to == da { a.peers.receive(&m, &from, &f) } else { b.peers.receive(&m, &from, &f) };
+        let (out, done, _) = if to == da { a.peers.receive(&m, &from, &f) } else { b.peers.receive(&m, &from, &f) };
         for i in done {
             seen.push((to.clone(), i.mine, i.message.clone()));
             if to == db_ {

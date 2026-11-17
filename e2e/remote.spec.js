@@ -93,3 +93,41 @@ test("switching machines shows the next one loading, never the last one's sessio
   await expect(titles).toHaveText(["Rate limiter"]);
   await expect(page.locator("#remoteBanner")).toBeHidden();
 });
+
+// Opening on another machine (a reload, a restart) says its sessions are coming, and a third machine slow to say its
+// name doesn't hold them back.
+test("a machine slow to answer doesn't hold back the sessions of the one shown", async ({ page }) => {
+  test.skip(test.info().project.name !== "web", "stands in for the relay over HTTP");
+  w = makeWorld();
+  addSession(w, { cwd: "/w/acme/api", agentName: "Rate limiter", turns: [{ user: "add buckets" }] });
+  srv = await launch(w);
+  await page.route("**/api/cloud", (r) => r.fulfill({ json: {
+    link: { state: "online" }, trust: { state: "member" },
+    machines: [{ device: "me-device", me: true, online: true }, { device: "studio-device", me: false, online: true },
+      { device: "laptop-device", me: false, online: true }],
+  } }));
+  await page.route("**/api/remote", (r) => r.fulfill({ json: { enabled: false } }));
+  let release, sessions;
+  const held = new Promise((r) => { release = r; });
+  const listed = new Promise((r) => { sessions = r; });
+  await page.route("**/api/cloud/call", async (r) => {
+    const { device, method, path } = r.request().postDataJSON();
+    if (path === "/api/machine") {
+      if (device === "laptop-device") await held;
+      return r.fulfill({ json: { name: device === "studio-device" ? "Studio" : "Laptop" } });
+    }
+    if (path === "/api/sessions") await listed;
+    try {
+      const res = await srv.api(method, path);
+      return await r.fulfill({ status: res.status, json: res.json });
+    } catch { return r.abort().catch(() => {}); }
+  });
+  await page.addInitScript(() => localStorage.setItem("machine", "studio-device"));
+  await srv.open(page);
+  await expect(page.locator("#empty")).toHaveText("Loading the sessions of Studio…");
+  sessions();
+  await expect(page.locator("#list li .title")).toHaveText(["Rate limiter"]);
+  await expect(page.locator("#machine option[value=laptop-device]")).toHaveText("laptop-d");
+  release();
+  await expect(page.locator("#machine option[value=laptop-device]")).toHaveText("Laptop");
+});

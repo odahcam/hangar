@@ -137,6 +137,11 @@ impl Peers {
         }
     }
 
+    /// The session we started with `peer`, if any: what `send` put it on.
+    pub fn mine(&self, peer: &str) -> Option<[u8; 8]> {
+        self.mine.get(peer).copied()
+    }
+
     /// Replies on the session a message came in on (the peer's, or ours).
     pub fn reply(&mut self, peer: &str, sid: &[u8; 8], plaintext: &[u8]) -> Result<Vec<Out>, String> {
         let s = self.sessions.get_mut(&(peer.to_string(), *sid)).ok_or("no_session")?;
@@ -146,9 +151,16 @@ impl Peers {
         }
     }
 
-    /// Takes a frame from `from` (stamped by the relay). Returns frames to send back and complete messages. Frames
-    /// from devices outside the chain are dropped before any crypto.
-    pub fn receive(&mut self, members: &Members, from: &str, f: &[u8]) -> (Vec<Out>, Vec<Incoming>) {
+    /// Takes a frame from `from` (stamped by the relay). Returns frames to send back, complete messages, and the
+    /// session we started with `from` if this frame ended it: what was sent on it gets no reply. Frames from devices
+    /// outside the chain are dropped before any crypto.
+    pub fn receive(&mut self, members: &Members, from: &str, f: &[u8]) -> (Vec<Out>, Vec<Incoming>, Option<[u8; 8]>) {
+        let mut ended = None;
+        let (out, done) = self.frame_in(members, from, f, &mut ended);
+        (out, done, ended)
+    }
+
+    fn frame_in(&mut self, members: &Members, from: &str, f: &[u8], ended: &mut Option<[u8; 8]>) -> (Vec<Out>, Vec<Incoming>) {
         let (mut out, mut done) = (vec![], vec![]);
         let Some(remote) = members.get(from).and_then(|dh| unb64(dh)) else { return (out, done) };
         if f.len() < 9 {
@@ -221,6 +233,7 @@ impl Peers {
                         self.sessions.remove(&key);
                         if self.mine.get(from) == Some(&sid) {
                             self.mine.remove(from);
+                            *ended = Some(sid);
                         }
                         out.push((from.to_string(), frame(RESET, &sid, &[])));
                     }
@@ -231,6 +244,7 @@ impl Peers {
                 if self.mine.get(from) == Some(&sid) {
                     self.mine.remove(from);
                     self.sessions.remove(&key);
+                    *ended = Some(sid);
                 }
             }
             _ => {}

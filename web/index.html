@@ -280,9 +280,11 @@ function showView(v) {
 // through the relay. Only what that machine lets a paired device do goes there (see core/src/remote.rs); everything
 // else, settings included, stays on this machine.
 let cloud = null, remote = null, machine = "", machineNames = {};
-/** The machine whose sessions were asked for after a switch and haven't come yet (the list shows that it's loading). */
+/** The machine whose sessions were asked for after a switch, or at start, and haven't come yet (the list shows that
+ * it's loading). */
 let loadingFrom = null;
 try { machine = localStorage.getItem("machine") || ""; } catch {}
+loadingFrom = machine || null;
 const REMOTE_OK = /^(GET \/api\/(sessions|accounts|machine)$|PATCH \/api\/session\/|POST \/api\/(order$|resume\/|close\/|dismiss-suggestion\/))/;
 // With another machine shown, anything outside that list is refused here rather than run on this machine: the
 // screen shows the other machine, and the same ~/.claude path exists on both.
@@ -925,11 +927,25 @@ async function loadCloud() {
     remote = cloud.link.state === "off" ? null : await apiLocal("GET", "/api/remote");
   } catch { cloud = null; }
   const others = cloud?.machines?.filter((m) => !m.me) || [];
-  // Names come from each machine, once; one that is offline keeps its short key until it answers.
-  await Promise.all(others.filter((m) => m.online && !machineNames[m.device]).map(async (m) => {
-    try { machineNames[m.device] = (await apiLocal("POST", "/api/cloud/call", { device: m.device, method: "GET", path: "/api/machine" })).name || short(m.device); } catch {}
-  }));
+  // Names come from each machine, once, and nothing waits for them: a machine slow to answer shows its short key
+  // until it does, without holding back the sessions of the one shown.
+  for (const m of others.filter((m) => m.online && !machineNames[m.device] && !naming.has(m.device))) {
+    naming.add(m.device);
+    apiLocal("POST", "/api/cloud/call", { device: m.device, method: "GET", path: "/api/machine" })
+      .then((r) => {
+        machineNames[m.device] = r.name || short(m.device);
+        machineOptions();
+        if (!document.activeElement?.matches("input[type=text]")) render();
+      }, () => {})
+      .finally(() => naming.delete(m.device));
+  }
   if (machine && !others.some((m) => m.device === machine)) { machine = ""; try { localStorage.removeItem("machine"); } catch {} }
+  machineOptions();
+}
+
+const naming = new Set();
+function machineOptions() {
+  const others = cloud?.machines?.filter((m) => !m.me) || [];
   const sel = $("#machine");
   sel.replaceChildren(el("option", { value: "", text: t("thisMachine") }),
     ...others.map((m) => el("option", { value: m.device, text: machineName(m.device) + (m.online ? "" : " " + t("offlineL")), disabled: m.online ? false : "" })));
