@@ -465,7 +465,7 @@ function render() {
   // Settings are this machine's: with another one shown, its accounts aren't listed here as if they could be edited.
   const local = machine ? [panel(t("pAccounts"), "", [el("div", { class: "meta", text: t("settingsLocalOnly", { name: machineName(machine) }) }),
     el("div", {}, [btn(t("showThisMachine"), "", showThisMachine)])])] : [accountsPanel(), classifierSettings()];
-  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), ...local, cloudPanel(), remotePanel());
+  if (set) return $("#settings").replaceChildren(...[el("div", {}, [btn(t("back"), "", settingsBack)]), ...local, cloudPanel(), remotePanel()].filter(Boolean));
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
   const acct = multi() ? $("#acct").value : "";
   const byPrompts = $("#sort").value === "prompt";
