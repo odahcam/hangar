@@ -6,8 +6,8 @@
 # Everything runs inside main, called on the last line, so a download cut short runs nothing.
 set -eu
 
-VERSION=0.5.0
-SHA256=4355b0cdf0875f477615477fa0eba1f0d766f0603bf72c85a34dd8f41eb4e28d
+VERSION=0.5.1
+SHA256=eb7ee05e784d59b494c11db69c8d9d350f218d1bfd5badc1f7bcbb0ba2beef3f
 
 main() {
 	repo="https://github.com/odahcam/hangar/releases/download/v$VERSION/Hangar.zip"
