@@ -58,7 +58,7 @@ async function otherMachine(page, onCall) {
     try { const res = await srv.api(body.method, body.path); return { status: res.status, json: res.json }; }
     catch { return { status: 500, json: { error: "stopped" } }; }
   });
-  await page.addInitScript(() => localStorage.setItem("machine", "studio-device"));
+  await srv.init(page, () => localStorage.setItem("machine", "studio-device"));
 }
 
 test("another machine's failure names it and says what went wrong, once", async ({ page }) => {

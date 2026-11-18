@@ -36,7 +36,7 @@ test("resuming a session of another machine says where it opens, and confirms it
     if (path === "/api/machine") return { json: { name: "Studio" } };
     if (path.startsWith("/api/resume/")) return { json: { ok: true } };
   });
-  await page.addInitScript(() => localStorage.setItem("machine", "studio-device"));
+  await srv.init(page, () => localStorage.setItem("machine", "studio-device"));
   page = await srv.open(page);
 
   const row = (title) => page.locator("#list li", { has: page.locator(".title", { hasText: title }) });
@@ -106,7 +106,7 @@ test("a machine slow to answer doesn't hold back the sessions of the one shown",
     }
     if (path === "/api/sessions") await listed;
   });
-  await page.addInitScript(() => localStorage.setItem("machine", "studio-device"));
+  await srv.init(page, () => localStorage.setItem("machine", "studio-device"));
   page = await srv.open(page);
   await expect(page.locator("#empty")).toHaveText("Loading the sessions of Studio…");
   sessions();

@@ -68,6 +68,8 @@ async function launchWeb(w, env) {
       await page.goto(srv.base + "/");
       return page;
     },
+    // A script run at the start of every document of the page the specs drive (storage set up before the UI reads it).
+    async init(page, fn) { await page.addInitScript(fn); },
     async intercept(_, fn) { stand.intercept(fn); },
     async slow(_, ms, prefix) { stand.slow(ms, prefix); },
     async fail(_, prefix, error) { stand.fail(prefix, error); },
@@ -170,6 +172,8 @@ async function launchDesktop(w, env) {
     // The window loaded at launch; reloading picks up the setup a spec did since (stand-ins, storage), as navigating
     // there does on the web.
     async open() { await page.reload(); return page; },
+    // On the app's window, not the browser page Playwright hands the spec.
+    async init(_, fn) { await page.addInitScript(fn); },
     async intercept(_, fn) { stand.intercept(fn); },
     async slow(_, ms, prefix) { stand.slow(ms, prefix); },
     async fail(_, prefix, error) { stand.fail(prefix, error); },
