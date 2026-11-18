@@ -4,8 +4,8 @@
 # so each release updates both lines and redeploys the Worker.
 # Everything runs inside the function, called on the last line, so a download cut short runs nothing.
 function Install-Hangar {
-    $version = '0.4.0'
-    $sha256 = 'b1ba1438e34758e764f64bb0a26c7bf6b04becf7d1cb24be13b59b7e7af6550b'
+    $version = '0.5.0'
+    $sha256 = '0c61e80eecc1c722cca2e467e59153a8e0dee2f2b01a122061133f0189a5c6e1'
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
     if (-not [Environment]::Is64BitOperatingSystem) { throw 'Hangar needs 64-bit Windows' }
