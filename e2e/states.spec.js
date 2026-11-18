@@ -11,14 +11,12 @@ test.beforeEach(async () => {
 });
 test.afterEach(async () => { await srv?.stop(); srv = null; if (w) cleanup(w); w = null; });
 
-const web = () => test.skip(test.info().project.name !== "web", "set up before the page loads, which only the web target can");
 const titles = (page) => page.locator("#list li .title");
 const panel = async (page) => { await titles(page).first().click(); return page.locator("#detail"); };
 
 test("the first load says the sessions are on their way", async ({ page }) => {
-  web();
   await srv.slow(page, 1500, "/api/sessions");
-  await srv.open(page);
+  page = await srv.open(page);
   await expect(page.locator("#empty")).toHaveText("Loading the sessions…");
   await expect(page.locator("#counts")).toHaveText("loading…");
   await expect(titles(page)).toHaveText(["Rate limiter"]);
@@ -26,9 +24,8 @@ test("the first load says the sessions are on their way", async ({ page }) => {
 });
 
 test("a first load that fails says why in the list's place, and tries again", async ({ page }) => {
-  web();
   await srv.fail(page, "/api/sessions", "boom");
-  await srv.open(page);
+  page = await srv.open(page);
   await expect(page.locator("#empty")).toContainText("server unavailable: boom");
   await expect(page.locator("#counts")).toHaveText("");
   await srv.slow(page, 0, "/api/sessions");
@@ -49,34 +46,29 @@ test("a reload that fails keeps the list, said to be possibly out of date", asyn
   await expect(bar).toBeHidden();
 });
 
-// The other machine is stood in for at the HTTP boundary, as in remote.spec.js.
+// The other machine is stood in for at the core's boundary, as in remote.spec.js: shown from the start.
 async function otherMachine(page, onCall) {
-  await page.route("**/api/cloud", (r) => r.fulfill({ json: {
-    link: { state: "online" }, trust: { state: "member" },
-    machines: [{ device: "me-device", me: true, online: true }, { device: "studio-device", me: false, online: true }],
-  } }));
-  await page.route("**/api/remote", (r) => r.fulfill({ json: { enabled: false } }));
-  await page.route("**/api/cloud/call", async (r) => {
-    const { method, path } = r.request().postDataJSON();
-    const answer = await onCall(method, path);
-    if (answer) return r.fulfill(answer);
-    try {
-      const res = await srv.api(method, path);
-      return await r.fulfill({ status: res.status, json: res.json });
-    } catch { return r.abort().catch(() => {}); }
+  await srv.intercept(page, async ({ path, body }) => {
+    if (path === "/api/cloud") return { json: { link: { state: "online" }, trust: { state: "member" },
+      machines: [{ device: "me-device", me: true, online: true }, { device: "studio-device", me: false, online: true }] } };
+    if (path === "/api/remote") return { json: { enabled: false } };
+    if (path !== "/api/cloud/call") return null;
+    const a = await onCall(body.method, body.path);
+    if (a) return a;
+    try { const res = await srv.api(body.method, body.path); return { status: res.status, json: res.json }; }
+    catch { return { status: 500, json: { error: "stopped" } }; }
   });
   await page.addInitScript(() => localStorage.setItem("machine", "studio-device"));
 }
 
 test("another machine's failure names it and says what went wrong, once", async ({ page }) => {
-  web();
   let named, answers = [{ status: 408, json: { error: "stale_call" } }, { status: 504, json: { error: "machine_timeout" } }];
   const naming = new Promise((r) => { named = r; });
   await otherMachine(page, async (method, path) => {
     if (path === "/api/machine") { await naming; return { json: { name: "Studio" } }; }
     if (path === "/api/sessions") return answers.shift();
   });
-  await srv.open(page);
+  page = await srv.open(page);
   const empty = page.locator("#empty");
   // Its name hasn't come yet: its key stands in, and the name replaces it once it does.
   await expect(empty).toContainText("studio-d: the request took over a minute to get there and was dropped, try again");
@@ -90,7 +82,6 @@ test("another machine's failure names it and says what went wrong, once", async 
 });
 
 test("another machine's account color can't carry other styles", async ({ page }) => {
-  web();
   await otherMachine(page, async (method, path) => {
     if (path === "/api/machine") return { json: { name: "Studio" } };
     if (path === "/api/accounts") {
@@ -98,7 +89,7 @@ test("another machine's account color can't carry other styles", async ({ page }
       return { json: [{ ...main, name: "Main", color: "red;position:fixed;inset:0" }, { ...main, dir: "/elsewhere", name: "Other", color: "#123456" }] };
     }
   });
-  await srv.open(page);
+  page = await srv.open(page);
   const acct = page.locator("#list li .acct");
   await expect(acct).toHaveText("Main");
   await expect(acct).toHaveCSS("position", "static");
@@ -176,9 +167,8 @@ test("Insights says it's loading, and a failure says why and tries again", async
 });
 
 test("tiles that fail to load say so, and the overview stops saying they're loading", async ({ page }) => {
-  web();
   await srv.fail(page, "/api/insights", "boom");
-  await srv.open(page);
+  page = await srv.open(page);
   await expect(page.locator("#tiles")).toContainText("Failed to load: boom");
   await expect(page.locator("#detail")).toContainText("Failed to load: boom");
   await srv.slow(page, 0, "/api/insights");
