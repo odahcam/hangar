@@ -46,7 +46,7 @@ test("resuming opens claude under the session's own account", { skip: !DARWIN },
   srv = await startServer(w);
   await srv.api("POST", `/api/resume/${s.id}`);
   const script = calls(w, "osascript").map((c) => c.script).find((x) => x.includes("do script"));
-  assert.ok(script.includes(`CLAUDE_CONFIG_DIR='${personal}' claude --resume ${s.id}`), script);
+  assert.ok(script.includes(`hangar-resume' '${s.id}' '--config' '${personal}'`), script);
 });
 
 test("an account can be renamed and recolored; a bad color is refused", async () => {

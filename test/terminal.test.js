@@ -3,7 +3,8 @@ const { test, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { DARWIN, WIN32, makeWorld, addSession, appendTurns, addLive, setTabs, calls, resumed, startServer, cleanup, waitFor } = require("./helpers");
+const { spawnSync } = require("node:child_process");
+const { RESUME, DARWIN, WIN32, makeWorld, addAccount, addSession, appendTurns, addLive, setTabs, calls, resumed, startServer, cleanup, waitFor } = require("./helpers");
 
 let w, srv;
 beforeEach(() => { w = makeWorld(); });
@@ -38,15 +39,15 @@ test("a live session without a name takes the Terminal tab title", { skip: !DARW
   assert.equal((await srv.session(s.id)).title, "Tab title");
 });
 
-test("resuming a closed session opens a new Terminal tab with claude --resume in its cwd", { skip: !DARWIN }, async () => {
+test("resuming a closed session opens a new Terminal tab running the resume helper in its cwd", { skip: !DARWIN }, async () => {
   const s = addSession(w, { cwd: "/work/it's here", turns: [{ user: "a" }] });
   srv = await startServer(w);
   const r = await srv.api("POST", `/api/resume/${s.id}`);
   assert.deepEqual(r.json, { opened: true });
   const script = calls(w, "osascript").map((c) => c.script).find((x) => x.includes("do script"));
   // The cd runs alone first: Terminal only learns the tab's directory at a prompt, and new tabs inherit it from there.
-  assert.ok(script.includes(`do script "cd '/work/it'\\\\''s here'\\ncd '/work/it'\\\\''s here' && unset CLAUDECODE CLAUDE_PID CLAUDE_CODE_CHILD_SESSION `), script);
-  assert.ok(script.includes(` CLAUDE_CODE_MESSAGING_TOKEN && CLAUDE_CONFIG_DIR='${w.claude}' claude --resume ${s.id}`), script);
+  // The account goes to the helper, which sets it (see the helper's own test below): the shell only runs it.
+  assert.ok(script.includes(`do script "cd '/work/it'\\\\''s here'\\ncd '/work/it'\\\\''s here' && '${RESUME}' '${s.id}' '--config' '${w.claude}'"`), script);
 });
 
 test("a session with no message yet resumes in the folder its project name resolves to on disk", { skip: !DARWIN }, async () => {
@@ -75,6 +76,28 @@ test("a session with no message whose project name fits no single folder is refu
   assert.deepEqual(calls(w, "wt"), []);
 });
 
+test("a cwd with a control character or no root is refused, not typed into the terminal", async () => {
+  const bad = [addSession(w, { cwd: "/work/a\u0003b", turns: [{ user: "a" }] }), addSession(w, { cwd: "/work/a\u001bb", turns: [{ user: "a" }] }),
+    addSession(w, { cwd: "work/relative", turns: [{ user: "a" }] })];
+  srv = await startServer(w);
+  for (const s of bad) {
+    const r = await srv.api("POST", `/api/resume/${s.id}`);
+    assert.equal(r.status, 409);
+    assert.deepEqual(r.json, { error: "unsupported_path" });
+  }
+  assert.ok(!calls(w, "osascript").some((c) => c.script.includes("do script")));
+  assert.deepEqual(calls(w, "wt"), []);
+});
+
+test("under a non-POSIX login shell a cwd its quoting can't hold is refused", { skip: !DARWIN }, async () => {
+  const s = addSession(w, { cwd: "/work/it's here", turns: [{ user: "a" }] });
+  const plain = addSession(w, { cwd: "/work/plain", turns: [{ user: "a" }] });
+  srv = await startServer(w, { HANGAR_LOGIN_SHELL: "/opt/homebrew/bin/fish" });
+  assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { error: "unsupported_path" });
+  assert.ok(!calls(w, "osascript").some((c) => c.script.includes("do script")));
+  assert.deepEqual((await srv.api("POST", `/api/resume/${plain.id}`)).json, { opened: true });
+});
+
 test("resuming a live session focuses its tab instead of opening another", { skip: !DARWIN }, async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
   addLive(w, s);
@@ -83,7 +106,7 @@ test("resuming a live session focuses its tab instead of opening another", { ski
   setTabs(w, [{ tty, busy: true, title: "x" }]);
   const r = await srv.api("POST", `/api/resume/${s.id}`);
   assert.deepEqual(r.json, { focused: tty });
-  assert.ok(!calls(w, "osascript").some((c) => c.script.includes("claude --resume")));
+  assert.ok(!calls(w, "osascript").some((c) => c.script.includes("hangar-resume")));
 });
 
 test("resuming a live session whose tab is gone opens a new tab", { skip: !DARWIN }, async () => {
@@ -164,21 +187,87 @@ test("on Windows a live session is live, with no tab to focus", { skip: !WIN32 }
   assert.deepEqual((await srv.session(s.id)).live, { pid: child.pid, canFocus: false });
 });
 
-// Started from a Claude Code session, Hangar inherits the variables that would make the resumed claude its child
-// (no transcript): they are kept from wt and cleared inside the tab, which may get the window's environment instead.
-test("on Windows resuming a closed session opens a Windows Terminal tab in its cwd, not as a Claude Code child", { skip: !WIN32 }, async () => {
+// The tab runs the helper itself, no shell, so Windows Terminal opens the user's default profile; the helper sets the
+// account (see its own test below). wt gets neither what would make claude a Claude Code session's child nor the
+// look of the terminal Hangar was started from (an agent's NO_COLOR left sessions colorless).
+test("on Windows resuming a closed session opens a Windows Terminal tab running the resume helper in its cwd", { skip: !WIN32 }, async () => {
   const s = addSession(w, { cwd: String.raw`C:\work\a;b`, turns: [{ user: "a" }] });
-  srv = await startServer(w, { CLAUDECODE: "1", CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CODE_SESSION_ID: "parent" });
+  srv = await startServer(w, { CLAUDECODE: "1", CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CODE_SESSION_ID: "parent",
+    NO_COLOR: "1", TERM_PROGRAM: "ghostty", TERM_PROGRAM_VERSION: "1.0" });
   const r = await srv.api("POST", `/api/resume/${s.id}`);
   assert.deepEqual(r.json, { opened: true });
-  const clear = ["CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
-    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_BRIDGE_MCP_CARRIER",
-    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"].map((k) => `set ${k}=&& `).join("");
   const [call] = calls(w, "wt");
-  assert.deepEqual(call.args, ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`, "cmd", "/c",
-    `${clear}set CLAUDE_CONFIG_DIR=${w.claude.replaceAll(";", "\\;")}&& claude --resume ${s.id}`]);
-  assert.deepEqual(call.sessionEnv, []);
+  assert.deepEqual(call.args, ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`,
+    RESUME.replaceAll(";", "\\;"), s.id, "--config", w.claude.replaceAll(";", "\\;")]);
+  assert.deepEqual(call.terminalEnv, []);
   assert.ok(resumed(w, s.id));
+});
+
+// Given a command without -p, Windows Terminal would take the profiles' common settings, so the tab names the
+// default profile from its settings (which may have comments).
+test("on Windows the tab opens under Windows Terminal's default profile", { skip: !WIN32 }, async () => {
+  const dir = path.join(w.root, "local", "Packages", "Microsoft.WindowsTerminal_8wekyb3d8bbwe", "LocalState");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "settings.json"),
+    '{\n  // "defaultProfile": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}",\n  "defaultProfile" : "{574e775e-4f2a-5b96-ac1e-a2962a402336}",\n  "profiles": { "defaults": {} }\n}\n');
+  const s = addSession(w, { cwd: String.raw`C:\work\p`, turns: [{ user: "a" }] });
+  srv = await startServer(w);
+  assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { opened: true });
+  assert.deepEqual(calls(w, "wt")[0].args.slice(0, 7),
+    ["-w", "0", "new-tab", "-p", "{574e775e-4f2a-5b96-ac1e-a2962a402336}", "--startingDirectory", String.raw`C:\work\p`]);
+});
+
+// No shell parses the account folder any more: quotes of any kind reach the helper as they are.
+test("on Windows an account folder with quotes reaches the helper as one argument", { skip: !WIN32 }, async () => {
+  // (A double quote can't be in a Windows file name.)
+  const dir = addAccount(w, "claude-it's \u2018a\u2019 & %b%");
+  const s = addSession(w, { claude: dir, cwd: String.raw`C:\work\q`, turns: [{ user: "a" }] });
+  srv = await startServer(w);
+  assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { opened: true });
+  assert.deepEqual(calls(w, "wt")[0].args.slice(-2), ["--config", dir]);
+});
+
+// What every tab runs: claude --resume under the account, without what makes it a Claude Code session's child.
+test("the resume helper starts claude --resume under the given account, as no session's child", () => {
+  const id = "0b7e4a2c-1d2f-4a6b-9c3d-5e6f7a8b9c0d";
+  const env = { ...process.env, CLAUDE_BIN: path.join(__dirname, "bin", "claude.js"), FAKE_LOG: w.log, FAKE_VERDICTS: w.verdicts,
+    CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "parent", CLAUDE_CONFIG_DIR: "/somewhere/else" };
+  // A tab runs it in the session's folder.
+  const run = (args, cwd = w.root) => spawnSync(RESUME, args, { env, cwd, input: "", encoding: "utf8" });
+  run([id, "--config", "/accounts/work"]);
+  run([id]);
+  // A claude Hangar picked (CLAUDE_BIN here, ~/.local/bin and the like for real) runs even from a folder that holds
+  // it: a session opened in the home folder resumes.
+  run([id], path.join(__dirname, ".."));
+  const [withAccount, plain, fromAbove] = calls(w, "claude");
+  assert.deepEqual(withAccount.args, ["--resume", id]);
+  assert.equal(withAccount.config, "/accounts/work");
+  assert.deepEqual(withAccount.sessionEnv, []);
+  // No account: the default one, so a CLAUDE_CONFIG_DIR the tab carries goes.
+  assert.equal(plain.config, null);
+  assert.deepEqual(fromAbove.args, ["--resume", id]);
+  // Anything but a session id is refused, claude not started.
+  assert.equal(run(["--version; rm -rf ~"]).status, 2);
+  assert.equal(calls(w, "claude").length, 3);
+});
+
+// Found by searching the PATH, a claude right in the session's folder (a login shell that puts "." back) is the
+// repository's pick, not Hangar's: refused. The login shell here is a stand-in that answers with that path.
+// (Skipped where a claude sits in a fixed place Hangar checks before the PATH: that one would be run instead.)
+const fixedClaude = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"].some((p) => fs.existsSync(p));
+test("the resume helper refuses a claude the PATH finds in the session's folder", { skip: WIN32 || fixedClaude }, () => {
+  const id = "0b7e4a2c-1d2f-4a6b-9c3d-5e6f7a8b9c0d";
+  const repo = path.join(w.root, "repo"), home = path.join(w.root, "home"), shell = path.join(w.root, "shell.sh");
+  fs.mkdirSync(repo);
+  fs.mkdirSync(home);
+  fs.writeFileSync(path.join(repo, "claude"), "#!/bin/sh\necho planted > \"$FAKE_LOG\"\n", { mode: 0o755 });
+  fs.writeFileSync(shell, `#!/bin/sh\necho '${fs.realpathSync(repo)}/claude'\n`, { mode: 0o755 });
+  const env = { ...process.env, HOME: home, SHELL: shell, FAKE_LOG: w.log };
+  delete env.CLAUDE_BIN;
+  const r = spawnSync(RESUME, [id], { env, cwd: fs.realpathSync(repo), encoding: "utf8" });
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /from the session's folder/);
+  assert.equal(fs.readFileSync(w.log, "utf8"), "");
 });
 
 test("on Windows resuming a session that is still running is refused instead of forking it", { skip: !WIN32 }, async () => {
@@ -190,9 +279,22 @@ test("on Windows resuming a session that is still running is refused instead of 
   assert.deepEqual(calls(w, "wt"), []);
 });
 
-test("on Windows closing a live session stops its process", { skip: !WIN32 }, async () => {
+// Asked with Ctrl+Break, as Claude Code quits cleanly on it (and ends its remote control session).
+test("on Windows closing a live session asks it to quit with Ctrl+Break", { skip: !WIN32 }, async () => {
   const s = addSession(w, { turns: [{ user: "a" }] });
-  const child = addLive(w, s);
+  const flag = path.join(w.root, "break");
+  const child = addLive(w, s, `process.on("SIGBREAK", () => { require("fs").writeFileSync(${JSON.stringify(flag)}, ""); process.exit(0); }); setTimeout(() => {}, 600e3)`, { console: true });
+  srv = await startServer(w);
+  const r = await srv.api("POST", `/api/close/${s.id}`);
+  assert.deepEqual(r.json, { closed: true });
+  await waitFor(() => !alive(child.pid) || child.exitCode !== null || child.signalCode !== null);
+  assert.ok(fs.existsSync(flag), "quit on Ctrl+Break");
+  assert.equal((await srv.session(s.id)).live, null);
+});
+
+test("on Windows a session that ignores Ctrl+Break is ended anyway", { skip: !WIN32 }, async () => {
+  const s = addSession(w, { turns: [{ user: "a" }] });
+  const child = addLive(w, s, `process.on("SIGBREAK", () => {}); setTimeout(() => {}, 600e3)`, { console: true });
   srv = await startServer(w);
   const r = await srv.api("POST", `/api/close/${s.id}`);
   assert.deepEqual(r.json, { closed: true });

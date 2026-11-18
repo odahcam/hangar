@@ -9,6 +9,8 @@ const ROOT = path.join(__dirname, "..");
 const BIN = path.join(__dirname, "bin");
 // The core over HTTP (core/src/bin/hangar-server.rs); `npm test` builds it first. HANGAR_SERVER points at another build.
 const SERVER = process.env.HANGAR_SERVER || path.join(ROOT, "target/debug", "hangar-server" + (process.platform === "win32" ? ".exe" : ""));
+// The resume helper a terminal tab runs (core/src/bin/hangar-resume.rs): the server finds it beside itself.
+const RESUME = path.join(path.dirname(SERVER), "hangar-resume" + (process.platform === "win32" ? ".exe" : ""));
 const HOUR = 36e5, DAY = 864e5;
 // Terminal features differ per OS (see core/src/platform); tests of one OS's terminal skip on the others.
 const DARWIN = process.platform === "darwin", WIN32 = process.platform === "win32";
@@ -83,8 +85,20 @@ function appendTurns(session, turns) {
 }
 
 // A "live" session: a real process registered the way Claude Code does in ~/.claude/sessions.
-function addLive(w, session) {
-  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 600e3)"], { stdio: "ignore" });
+// `code` is what the session's process runs (by default, it just waits). With `console`, on Windows it gets a (hidden)
+// console of its own, as in a terminal tab: closing it sends Ctrl+Break to its console, which mustn't reach the test
+// runner's. (Node's `detached` gives no console at all there, so it's started by PowerShell.)
+function addLive(w, session, code = "setTimeout(() => {}, 600e3)", { console = false } = {}) {
+  let child;
+  if (console && WIN32) {
+    const file = path.join(w.root, `live-${session.id}.js`);
+    fs.writeFileSync(file, code);
+    const ps = `(Start-Process -FilePath '${process.execPath}' -ArgumentList '"${file}"' -WindowStyle Hidden -PassThru).Id`;
+    const pid = Number(execFileSync("powershell.exe", ["-NoProfile", "-Command", ps], { encoding: "utf8" }).trim());
+    child = { pid, exitCode: null, signalCode: null, kill() { try { process.kill(pid); } catch {} } };
+  } else {
+    child = spawn(process.execPath, ["-e", code], { stdio: "ignore" });
+  }
   w.children.push(child);
   fs.writeFileSync(path.join(session.claude ?? w.claude, "sessions", child.pid + ".json"),
     JSON.stringify({ pid: child.pid, sessionId: session.id, cwd: session.cwd }));
@@ -105,10 +119,10 @@ function calls(w, bin) {
   return fs.readFileSync(w.log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((c) => !bin || c.bin === bin);
 }
 
-// Whether this OS's terminal was asked to run `claude --resume <id>`.
+// Whether this OS's terminal was asked to run the resume helper for session `id`.
 function resumed(w, id) {
-  return calls(w).some((c) => c.bin === "osascript" ? c.script.includes(`claude --resume ${id}`)
-    : c.bin === "wt" && c.args.join(" ").endsWith(`claude --resume ${id}`));
+  return calls(w).some((c) => c.bin === "osascript" ? c.script.includes("do script") && c.script.includes(`hangar-resume' '${id}'`)
+    : c.bin === "wt" && c.args.some((a) => /hangar-resume(\.exe)?$/.test(a)) && c.args.includes(id));
 }
 
 async function startServer(w, env = {}) {
@@ -121,11 +135,15 @@ async function startServer(w, env = {}) {
       HANGAR_WEB_DIR: path.join(ROOT, "web"),
       HANGAR_OSASCRIPT: path.join(BIN, "osascript.js"),
       HANGAR_WT: path.join(BIN, "wt.js"),
+      // Where Windows Terminal's settings are looked up: the world's, not the machine's.
+      LOCALAPPDATA: path.join(w.root, "local"),
       CLAUDE_BIN: path.join(BIN, "claude.js"),
       FAKE_LOG: w.log,
       FAKE_TABS: w.tabs,
       FAKE_VERDICTS: w.verdicts,
       HANGAR_CLASSIFY_START_MS: "3600000",
+      // Quoting tests assume a POSIX login shell, whatever the machine running them uses.
+      HANGAR_LOGIN_SHELL: "/bin/zsh",
       NODE_NO_WARNINGS: "1",
       ...env,
     },
@@ -196,7 +214,7 @@ function cleanup(w) {
   // locked after that is left to the OS temp cleanup rather than failing the test. (The backoff is linear: 10 retries
   // wait up to ~14s in all; 60 would wait 7.6 minutes.)
   try { fs.rmSync(w.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }); }
-  catch (e) { if (e.code !== "EPERM" && e.code !== "EBUSY") throw e; }
+  catch (e) { if (!["EPERM", "EBUSY", "ENOTEMPTY"].includes(e.code)) throw e; }
 }
 
 async function waitFor(fn, { timeout = 10000, every = 100 } = {}) {
@@ -209,4 +227,4 @@ async function waitFor(fn, { timeout = 10000, every = 100 } = {}) {
   }
 }
 
-module.exports = { stopApp, ROOT, BIN, HOUR, DAY, DARWIN, WIN32, resumed, ago, makeWorld, addAccount, addSession, appendTurns, addLive, setTabs, setVerdicts, calls, startServer, cleanup, waitFor };
+module.exports = { stopApp, ROOT, BIN, RESUME, HOUR, DAY, DARWIN, WIN32, resumed, ago, makeWorld, addAccount, addSession, appendTurns, addLive, setTabs, setVerdicts, calls, startServer, cleanup, waitFor };

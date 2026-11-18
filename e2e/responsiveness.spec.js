@@ -61,13 +61,16 @@ test("dragging reorders immediately", async () => {
   await expect(titles(page)).toHaveText(["Charlie", "Alpha", "Bravo"], QUICK);
 });
 
-test("Resume shows it is working until Terminal answers", async () => {
+// Busy until the session shows up open, or for at most 10 s (here nothing starts, so the full 10 s).
+test("Resume shows it is working until the session is open", async () => {
   const d = await panel(page, "Alpha");
   await d.getByRole("button", { name: "Resume", exact: true }).click();
   const busy = d.getByRole("button", { name: "Opening…" });
   await expect(busy).toBeDisabled(QUICK);
   await expect(busy).toHaveAttribute("aria-busy", "true");
-  await expect(d.getByRole("button", { name: "Resume", exact: true })).toBeEnabled({ timeout: SLOW_MS * 4 });
+  await page.waitForTimeout(SLOW_MS * 2);
+  await expect(busy).toBeDisabled();
+  await expect(d.getByRole("button", { name: "Resume", exact: true })).toBeEnabled({ timeout: 10000 + SLOW_MS * 4 });
 });
 
 test("Close shows it is working until the session has stopped", async () => {

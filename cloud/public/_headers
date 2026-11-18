@@ -1,0 +1,11 @@
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Strict-Transport-Security: max-age=31536000
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+
+# The install scripts read as text in a browser, so anyone can see what they run before piping them to a shell.
+/install.sh
+  Content-Type: text/plain; charset=utf-8
+/install.ps1
+  Content-Type: text/plain; charset=utf-8

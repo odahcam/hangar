@@ -196,14 +196,22 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
 .accts .dir { font: 11px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 .accts form { display: flex; gap: 6px; }
 .accts form input { flex: 1; }
+/* Another machine shown: said above everything, in the accent, with the way back at hand. */
+.remote-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 16px; padding: 10px 10px 10px 16px;
+  background: var(--accent); color: var(--bg); border-radius: 8px; font-size: 14px; }
+.remote-bar[hidden] { display: none; }
+.remote-bar .msg b { font-weight: 600; }
+.remote-bar .btn { background: var(--bg); color: var(--fg); border-color: transparent; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; background: var(--fg); color: var(--bg); font-size: 13px; padding: 8px 14px; border-radius: 6px; }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div class="remote-bar" id="remoteBanner" role="status" hidden><span class="msg"></span><button class="btn" id="remoteBack" data-i18n="showThisMachine"></button></div>
   <header>
     <h1>Hangar</h1>
     <span class="counts" id="counts" data-i18n="loading"></span>
+    <select id="machine" data-i18n-label="machine" hidden></select>
     <select id="locale" data-i18n-label="language"><option value="en">English</option><option value="pt">Português</option></select>
     <button class="btn" id="settingsBtn" data-i18n-label="settings">⚙</button>
   </header>
@@ -268,9 +276,27 @@ function showView(v) {
   render();
 }
 
+// The machine whose sessions are shown: "" is this one, otherwise another machine of the odahcam account, reached
+// through the relay. Only what that machine lets a paired device do goes there (see core/src/remote.rs); everything
+// else, settings included, stays on this machine.
+let cloud = null, remote = null, machine = "", machineNames = {};
+/** The machine whose sessions were asked for after a switch, or at start, and haven't come yet (the list shows that
+ * it's loading). */
+let loadingFrom = null;
+try { machine = localStorage.getItem("machine") || ""; } catch {}
+loadingFrom = machine || null;
+const REMOTE_OK = /^(GET \/api\/(sessions|accounts|machine)$|PATCH \/api\/session\/|POST \/api\/(order$|resume\/|close\/|dismiss-suggestion\/))/;
+// With another machine shown, anything outside that list is refused here rather than run on this machine: the
+// screen shows the other machine, and the same ~/.claude path exists on both.
+async function api(method, path, body) {
+  if (!machine) return apiLocal(method, path, body);
+  if (REMOTE_OK.test(`${method} ${path}`)) return apiLocal("POST", "/api/cloud/call", { device: machine, method, path, body: body ?? null });
+  throw new Error("remote_forbidden");
+}
+
 // The desktop app calls the core in-process (Tauri invoke); in a browser (tests, `npm start`) the same API is HTTP.
 // Looked up per call so the desktop e2e target can stand in for a slow or failing core.
-async function api(method, path, body) {
+async function apiLocal(method, path, body) {
   const core = window.__TAURI__?.core;
   if (core) return core.invoke("api", { method, path, body: body ?? null }).catch((e) => { throw new Error(e); });
   const r = await fetch(path, { method, headers: { "x-hangar": "1", "content-type": "application/json" }, body: body && JSON.stringify(body) });
@@ -323,9 +349,16 @@ function ago(iso) {
   const d = (Date.now() - new Date(iso)) / 864e5;
   return d < 1 ? t("today") : d < 2 ? t("yesterday") : t("daysAgo", { n: Math.floor(d) });
 }
+// `style` goes through the CSSOM: the desktop app's CSP puts a nonce in style-src, which makes the browser ignore
+// 'unsafe-inline', so a style attribute set as markup is dropped there (bars, dots and legends drawn blank).
 function el(tag, attrs = {}, kids = []) {
   const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) if (v !== false && v != null) k === "text" ? e.textContent = v : e.setAttribute(k, v);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === false || v == null) continue;
+    if (k === "text") e.textContent = v;
+    else if (k === "style") e.style.cssText = v;
+    else e.setAttribute(k, v);
+  }
   for (const k of [].concat(kids)) if (k) e.append(k);
   return e;
 }
@@ -370,12 +403,22 @@ function select(id, { openDetail = true, focus = false, toggle = false } = {}) {
 function render() {
   const ins = view === "insights", set = view === "settings";
   $("#insights").hidden = !ins; $("#settings").hidden = !set; $("#toolbar").hidden = ins || set; $("#split").hidden = ins || set;
-  $("#tabs").hidden = set; $("#tiles").hidden = set; $("#checkNow").hidden = view !== "pending";
+  // Another machine shows its sessions only: insights, tiles and done detection are this machine's.
+  $("#tabs").hidden = set; $("#tiles").hidden = set || !!machine; $("#checkNow").hidden = view !== "pending" || !!machine;
+  $("#tabs [data-v=insights]").hidden = !!machine;
+  $("#remoteBanner").hidden = !machine || set;
+  if (machine) {
+    const [before, after = ""] = t("controlling", { name: "\0" }).split("\0");
+    $("#remoteBanner .msg").replaceChildren(before, el("b", { text: machineName(machine) }), after);
+  }
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-pressed", b.dataset.v === view);
   $("#settingsBtn").setAttribute("aria-pressed", set);
   if (ins || set) $("#empty").hidden = true;
   if (ins) return loadInsights();
-  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), accountsPanel(), classifierSettings());
+  // Settings are this machine's: with another one shown, its accounts aren't listed here as if they could be edited.
+  const local = machine ? [panel(t("pAccounts"), "", [el("div", { class: "meta", text: t("settingsLocalOnly", { name: machineName(machine) }) }),
+    el("div", {}, [btn(t("showThisMachine"), "", showThisMachine)])])] : [accountsPanel(), classifierSettings()];
+  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), ...local, cloudPanel(), remotePanel());
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
   const acct = multi() ? $("#acct").value : "";
   const byPrompts = $("#sort").value === "prompt";
@@ -404,7 +447,7 @@ function render() {
   $("#split").classList.toggle("detail-open", detailOpen && !!sel);
   $("#split").classList.toggle("none", !list.length);
   $("#empty").hidden = list.length > 0;
-  $("#empty").textContent = view === "pending" ? t("emptyPending") : t("emptyDone");
+  $("#empty").textContent = loadingFrom ? t("loadingFrom", { name: machineName(loadingFrom) }) : view === "pending" ? t("emptyPending") : t("emptyDone");
   const n = (f) => items.filter(f).length;
   $("#counts").textContent = t("counts", {
     pending: n((s) => isHead(s) && s.status !== "done"), suggested: n((s) => s.suggestion), untriaged: n((s) => isHead(s) && s.priority == null && s.status !== "done"),
@@ -428,19 +471,55 @@ function statusIcon(st) {
 // The index has room for the last two folders of the project; the full path is in its tooltip and the panel.
 const shortProject = (p) => (p || "?").split(/[\\/]/).filter(Boolean).slice(-2).join("/") || "?";
 const familyOf = (s) => s.family ? items.filter((x) => x.family === s.family).sort((a, b) => (b.lastAt || "").localeCompare(a.lastAt || "")) : [s];
-// Brings a running session's terminal forward, or opens it in a new one.
-function resumeBtn(s) {
-  const b = btn(s.live ? t("goToTab") : t("resume"), "primary", () => pending(b, t("opening"), () => api("POST", `/api/resume/${s.id}`)));
+// Brings a running session's terminal forward, or opens it in a new one. On another machine that happens on its
+// screen, not this one: the button says where, and a toast confirms it, since nothing opens here.
+// Opening or closing a session settles a moment after the call returns: the process has to start (and register
+// itself) or quit, on this machine or another. Until the list shows it open (or closed), up to SETTLE_MS, the
+// session's button stays busy, through the renders that happen meanwhile.
+const SETTLE_MS = 10000;
+const settling = new Map(); // session id → { label, open }: the busy label, and whether it's opening or closing
+async function settle(s, label, call, open, ok) {
+  settling.set(s.id, { label, open });
+  render();
+  try {
+    await call();
+    if (ok) toast(ok);
+    for (const end = Date.now() + SETTLE_MS; Date.now() < end;) {
+      await load();
+      if (!!byId(s.id)?.live === open) break;
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  } catch (e) { toast(failed(e)); await load(); }
+  settling.delete(s.id);
+  render();
+}
+// While a session settles, the button of what's under way says so; the other one waits, disabled.
+function settlingBtn(b, s, open) {
+  const st = settling.get(s.id);
+  if (!st) return b;
+  b.disabled = true;
+  if (st.open === open) { b.textContent = st.label; b.setAttribute("aria-busy", "true"); }
   return b;
+}
+function resumeBtn(s) {
+  return settlingBtn(resumeBtnOf(s), s, true);
+}
+function resumeBtnOf(s) {
+  if (machine) {
+    const name = machineName(machine);
+    return btn(t(s.live ? "goToTabOn" : "resumeOn", { name }), "primary",
+      () => settle(s, t("openingOn", { name }), () => api("POST", `/api/resume/${s.id}`), true, t("openedOn", { name })));
+  }
+  return btn(s.live ? t("goToTab") : t("resume"), "primary", () => settle(s, t("opening"), () => api("POST", `/api/resume/${s.id}`), true));
 }
 function closeBtn(s) {
   let disarm;
   const b = btn(t("close"), "danger", () => {
     if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = t("confirmClose"); disarm = setTimeout(() => { b.classList.remove("armed"); b.textContent = t("close"); }, 3000); return; }
     clearTimeout(disarm);
-    pending(b, t("closing"), () => api("POST", `/api/close/${s.id}`), t("sessionClosed"));
+    settle(s, t("closing"), () => api("POST", `/api/close/${s.id}`), false, t("sessionClosed"));
   });
-  return b;
+  return settlingBtn(b, s, false);
 }
 
 // A line of the index: place, title (×n when the conversation spans sessions), project and the signs worth seeing
@@ -563,8 +642,10 @@ function overview() {
   const d = lastInsights;
   const head = el("div", { class: "d-head" }, [
     el("div", { class: "d-title" }, [el("h2", { text: t("overviewTitle") }), el("div", { class: "muted", text: t("overviewSub") })]),
-    btn(t("allInsights"), "", () => showView("insights")),
+    // Insights are this machine's: with another one shown there are none of its to point to.
+    machine ? null : btn(t("allInsights"), "", () => showView("insights")),
   ]);
+  if (machine) return [head];
   if (!d) return [head, el("div", { class: "muted", text: t("loading") })];
   const section = (title, sub, kids) => el("div", { class: "block" }, [el("div", { class: "k" }, [title, sub ? el("small", { text: " · " + sub }) : null]), ...kids]);
 
@@ -573,7 +654,7 @@ function overview() {
   const maxMb = Math.max(1, ...open.map((s) => s.mb));
   const memRows = open.map((s) => {
     const r = hbar([acctDot(s.account), (s.idleHours >= 24 ? "◌ " : "") + s.title], [seg(s.mb, maxMb, s.idleHours >= 24 ? "--age1" : "--s1", `${s.mb} MB`)],
-      `${s.mb} MB · ${s.idleHours}h`, s.idleHours >= 24 ? t("idleFor", { h: s.idleHours }) : "");
+      `${s.mb} MB · ${s.idleHours == null ? "—" : s.idleHours + "h"}`, s.idleHours >= 24 ? t("idleFor", { h: s.idleHours }) : "");
     // A line of this list opens its session, when the list has it.
     if (byId(s.id)) { r.classList.add("pick"); r.onclick = () => select(s.id); }
     return r;
@@ -676,6 +757,8 @@ function rankCell(s, rank, reorder, li) {
 // Copies the session into another account, the source kept unless "remove" is checked. An open session can't go:
 // it keeps writing where it started.
 function transferControl(s) {
+  // Moving between accounts is the machine's own business: not offered from another machine.
+  if (machine) return null;
   const targets = shown().filter((a) => a.dir !== s.account);
   const sel = el("select", { "aria-label": t("transferTo") }, targets.map((a) => el("option", { value: a.dir, text: a.name })));
   const rm = el("input", { type: "checkbox" });
@@ -837,6 +920,99 @@ function classifierSettings() {
   ]);
 }
 
+// --- Remote control: the odahcam account, this machine's place among its machines, and pairing.
+const short = (device) => device ? device.slice(0, 8) : "";
+const machineName = (device) => machineNames[device] || short(device);
+// The sign-in page opens in the default browser: the desktop app hands any outside address to it (see main.rs).
+function openExternal(url) { if (window.__TAURI__) location.assign(url); else window.open(url, "_blank", "noopener"); }
+// Called by the desktop app once the browser sends the hangar:// link back.
+window.cloudLinked = (err) => { toast(err ? failed(new Error(err)) : t("signedIn")); load(); };
+
+async function loadCloud() {
+  try {
+    cloud = await apiLocal("GET", "/api/cloud");
+    remote = cloud.link.state === "off" ? null : await apiLocal("GET", "/api/remote");
+  } catch { cloud = null; }
+  const others = cloud?.machines?.filter((m) => !m.me) || [];
+  // Names come from each machine, once, and nothing waits for them: a machine slow to answer shows its short key
+  // until it does, without holding back the sessions of the one shown.
+  for (const m of others.filter((m) => m.online && !machineNames[m.device] && !naming.has(m.device))) {
+    naming.add(m.device);
+    apiLocal("POST", "/api/cloud/call", { device: m.device, method: "GET", path: "/api/machine" })
+      .then((r) => {
+        machineNames[m.device] = r.name || short(m.device);
+        machineOptions();
+        if (!document.activeElement?.matches("input[type=text]")) render();
+      }, () => {})
+      .finally(() => naming.delete(m.device));
+  }
+  if (machine && !others.some((m) => m.device === machine)) { machine = ""; try { localStorage.removeItem("machine"); } catch {} }
+  machineOptions();
+}
+
+const naming = new Set();
+function machineOptions() {
+  const others = cloud?.machines?.filter((m) => !m.me) || [];
+  const sel = $("#machine");
+  sel.replaceChildren(el("option", { value: "", text: t("thisMachine") }),
+    ...others.map((m) => el("option", { value: m.device, text: machineName(m.device) + (m.online ? "" : " " + t("offlineL")), disabled: m.online ? false : "" })));
+  sel.value = machine;
+  sel.hidden = !others.length;
+}
+
+function cloudPanel() {
+  if (!cloud || cloud.link.state === "off") return null;
+  const c = cloud, trust = c.trust?.state, kids = [];
+  const signIn = (path) => act(async () => openExternal((await apiLocal("POST", path)).url));
+  if (c.link.state === "signed_out") {
+    kids.push(el("div", { class: "meta", text: t("cloudSignedOut") }), el("div", {}, [btn(t("signIn"), "", () => signIn("/api/cloud/login"))]));
+    return panel(t("pCloud"), t("pCloudSub"), kids);
+  }
+  kids.push(el("div", { class: "meta" }, [el("span", { text: c.link.state === "online" ? t("cloudOnline") : c.link.state === "retrying" ? t("cloudRetrying") : t("cloudConnecting") }),
+    el("span", { text: t("thisDevice", { id: short(c.device) }) })]));
+  const codeForm = (label) => {
+    const input = el("input", { type: "text", maxlength: 9, placeholder: "ABC-123", "aria-label": t("pairCode"), autocomplete: "off" });
+    const form = el("form", {}, [input, el("button", { class: "btn", type: "submit", text: label })]);
+    form.onsubmit = (e) => { e.preventDefault(); act(() => apiLocal("POST", "/api/cloud/join", { code: input.value })); };
+    return el("div", { class: "accts" }, [form]);
+  };
+  if (trust === "member") {
+    kids.push(...c.machines.map((m) => el("div", { class: "meta" }, [
+      el("span", { text: (m.me ? t("thisMachine") : machineName(m.device)) + (m.online ? "" : " " + t("offlineL")) }),
+      el("span", { class: "dir", text: short(m.device) }),
+      btn(m.me ? t("leave") : t("remove"), "danger", () => act(() => apiLocal("POST", "/api/cloud/remove", { device: m.device }))),
+    ])));
+    if (c.offer) kids.push(el("div", { class: "warn-box" }, [el("strong", { text: c.offer.slice(0, 3) + "-" + c.offer.slice(3) }), el("span", { text: t("offerHint") })]));
+    // Who the last code let in, with a way back: someone else may have read the code first.
+    if (c.joined) kids.push(el("div", { class: "warn-box" }, [el("span", { text: t("joinedNow", { id: short(c.joined) }) }),
+      el("div", {}, [btn(t("undo"), "danger", () => act(() => apiLocal("POST", "/api/cloud/remove", { device: c.joined })))])]));
+    kids.push(el("div", {}, [btn(t("addMachine"), "", () => act(() => apiLocal("POST", "/api/cloud/offer")))]));
+  } else if (trust === "not_paired") {
+    kids.push(el("div", { class: "meta", text: c.joining ? t("pairing") : t("notPaired") }), codeForm(t("pair")));
+    if (c.joinRefused) kids.push(el("div", { class: "warn", text: t("pairRefused") }));
+  } else if (trust === "refused") {
+    kids.push(el("div", { class: "warn", text: t("refusedChain", { why: c.trust.reason }) }), codeForm(t("pairAgain")));
+    if (c.joinRefused) kids.push(el("div", { class: "warn", text: t("pairRefused") }));
+    kids.push(el("div", { class: "meta", text: c.reset ? t("resetPending", { at: new Date(c.reset).toLocaleString() }) : t("recoverHint") }),
+      el("div", {}, [btn(t("recover"), "danger", () => signIn("/api/cloud/recover"))]));
+  }
+  kids.push(el("div", {}, [btn(t("signOut"), "", () => act(() => apiLocal("POST", "/api/cloud/logout")))]));
+  return panel(t("pCloud"), c.account ? t("pCloudAccount", { id: short(c.account) }) : t("pCloudSub"), kids);
+}
+
+// Whether the account's other machines may control this one, and what they did.
+function remotePanel() {
+  if (!cloud || cloud.link.state === "off" || !remote) return null;
+  const box = el("input", { type: "checkbox" });
+  box.checked = remote.enabled;
+  box.onchange = () => act(() => apiLocal("PATCH", "/api/remote", { enabled: box.checked }));
+  const rows = remote.log.slice(0, 10).map((e) => el("div", { class: "meta" }, [el("span", { text: clock(e.at) }), el("span", { text: machineName(e.device) }), el("span", { text: `${e.method} ${e.path}` })]));
+  const denied = remote.denied.slice(0, 5).map((e) => el("div", { class: "meta warn" }, [el("span", { text: clock(e.at) }), el("span", { text: machineName(e.device) }),
+    el("span", { text: t("deniedRow", { what: `${e.method} ${e.path}`, n: e.count }) })]));
+  return panel(t("pRemote"), t("pRemoteSub"), [el("label", { class: "btn" }, [box, " " + t("allowRemote")]),
+    ...(rows.length ? rows : [el("div", { class: "meta", text: t("noRemoteYet") })]), ...denied]);
+}
+
 async function loadInsights() {
   let d;
   try { d = await api("GET", "/api/insights"); } catch (e) { $("#insights").replaceChildren(el("div", { class: "empty", text: t("loadFailed", { msg: e.message }) })); return; }
@@ -848,7 +1024,8 @@ async function loadInsights() {
   const memRows = m.sessions.map((s) => {
     const idle = s.idleHours >= 24;
     return hbar([acctDot(s.account), `${idle ? "◌ " : ""}${s.title}`], [seg(s.mb, maxMb, idle ? "--age1" : "--s1", `${s.mb} MB`)],
-      `${s.mb} MB · ${s.idleHours}h`, idle ? t("idleFor", { h: s.idleHours }) : "");
+      // No prompt yet: no idle time to tell.
+      `${s.mb} MB · ${s.idleHours == null ? "—" : s.idleHours + "h"}`, idle ? t("idleFor", { h: s.idleHours }) : "");
   });
   const idleCount = m.sessions.filter((s) => s.idleHours >= 24).length;
   const idleMb = m.sessions.filter((s) => s.idleHours >= 24).reduce((a, s) => a + s.mb, 0);
@@ -921,8 +1098,24 @@ async function loadInsights() {
   );
 }
 
+// Each load has a generation: only the latest one's answer is shown, so a slow machine's list can't land over the
+// machine picked after it.
+let loadGen = 0;
 async function load() {
-  try { [items, accounts, classifier] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts"), api("GET", "/api/classifier")]); } catch (e) { $("#counts").textContent = t("serverDown", { msg: e.message }); return; }
+  const was = machine, gen = ++loadGen;
+  let got;
+  try { got = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts"), machine ? null : api("GET", "/api/classifier"), loadCloud()]); } catch (e) {
+    if (gen !== loadGen) return;
+    const msg = machine ? t("machineDown", { name: machineName(machine), msg: failed(e) }) : t("serverDown", { msg: e.message });
+    $("#counts").textContent = msg;
+    if (loadingFrom) { loadingFrom = null; render(); $("#empty").textContent = msg; }
+    return;
+  }
+  if (gen !== loadGen) return;
+  // The machine shown went away from the account meanwhile: show this one's sessions instead.
+  if (machine !== was) return load();
+  [items, accounts, classifier] = got;
+  loadingFrom = null;
   const sel = $("#proj"), cur = sel.value;
   sel.replaceChildren(el("option", { value: "", text: t("allProjects") }), ...[...new Set(items.map((s) => s.project).filter(Boolean))].sort().map((p) => el("option", { value: p, text: p })));
   sel.value = cur;
@@ -932,9 +1125,33 @@ async function load() {
   asel.hidden = !multi();
   const focused = document.activeElement?.id;
   render();
-  if (view !== "insights") loadTiles();
+  if (view !== "insights" && !machine) loadTiles();
   if (focused) document.getElementById(focused)?.focus();
 }
+
+// Switching machines empties the list at once and says whose sessions are on their way: nothing of the machine left
+// stays on screen while the next one answers (see load's generation).
+function switchMachine(next) {
+  machine = next;
+  $("#machine").value = next;
+  try { machine ? localStorage.setItem("machine", machine) : localStorage.removeItem("machine"); } catch {}
+  selectedId = null;
+  items = [];
+  loadingFrom = machine || null;
+  if (machine && view === "insights") return showView("pending"), load();
+  render();
+  load();
+}
+const showThisMachine = () => switchMachine("");
+$("#machine").onchange = (e) => switchMachine(e.target.value);
+$("#remoteBack").onclick = showThisMachine;
+// Pairing and sign-in move on their own (a code typed elsewhere, a browser coming back): Settings follows them.
+setInterval(async () => {
+  if (view !== "settings" || document.hidden) return;
+  const before = JSON.stringify([cloud, remote]);
+  await loadCloud();
+  if (JSON.stringify([cloud, remote]) !== before && !document.activeElement?.matches("input[type=text]")) render();
+}, 2000);
 
 $("#tabs").onclick = (e) => { const v = e.target.dataset?.v; if (v) showView(v); };
 $("#settingsBtn").onclick = () => view === "settings" ? settingsBack() : showView("settings");

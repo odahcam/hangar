@@ -232,7 +232,18 @@ impl Hangar {
             .or_else(|| cwd_from_project(file))
             .ok_or_else(|| ApiError(409, "folder_unknown".into()))?;
         let config = config_dir(file).filter(|d| !accounts::is_default(d));
-        self.platform.open(&cwd, id, config).map_err(|e| ApiError(500, e))?;
+        // The cwd comes verbatim from the transcript and both paths are typed into a terminal: quoting stops the shell,
+        // not the tty's line discipline, which acts on control bytes (^C, ^D, ^U, ESC) before the shell sees them.
+        // has_root, not is_absolute: on Windows a rooted "/work" is still not relative.
+        let typable = |p: &str| !p.chars().any(|c| c < ' ' || c == '\u{7f}');
+        if !Path::new(&cwd).has_root() || !typable(&cwd) || config.as_ref().is_some_and(|d| !typable(&d.to_string_lossy())) {
+            return Err(ApiError(409, "unsupported_path".into()));
+        }
+        if !crate::resume::valid_id(id) {
+            return Err(ApiError(409, "unsupported_id".into()));
+        }
+        let argv = crate::resume::argv(id, config).ok_or_else(|| ApiError(500, "no_resume_helper".into()))?;
+        self.platform.open(&cwd, &argv).map_err(|e| ApiError(500, e))?;
         Ok(json!({ "opened": true }))
     }
 
@@ -299,6 +310,11 @@ impl Hangar {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
+        }
+        // On Windows a session still there after Ctrl+Break is ended outright.
+        #[cfg(windows)]
+        if proc::alive(live.pid) {
+            proc::kill(live.pid);
         }
         if let Some(tty) = &live.tty {
             self.platform.exit_tab(tty, false);

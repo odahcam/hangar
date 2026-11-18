@@ -36,6 +36,27 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+// Terminal types `do script` into the user's login shell. sh_quote is POSIX quoting: in fish \' and \\ are escapes
+// inside single quotes and csh/tcsh expand ! there, so for those shells a path with one of them is refused rather
+// than typed. Overridable so tests can stand in for the account's shell.
+static LOGIN_SHELL: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("HANGAR_LOGIN_SHELL").unwrap_or_else(|_| {
+        // SAFETY: getpwuid returns a pointer into static storage or null; it is read once, here, before any other call.
+        unsafe {
+            let pw = libc::getpwuid(libc::getuid());
+            if pw.is_null() || (*pw).pw_shell.is_null() {
+                return String::new();
+            }
+            std::ffi::CStr::from_ptr((*pw).pw_shell).to_string_lossy().into_owned()
+        }
+    })
+});
+
+fn posix_typable(s: &str) -> bool {
+    let shell = Path::new(LOGIN_SHELL.as_str()).file_name().and_then(OsStr::to_str).unwrap_or("");
+    matches!(shell, "zsh" | "bash" | "sh" | "ksh" | "dash") || !s.contains(['\'', '\\', '!'])
+}
+
 fn tab_script(tty: &str, body: &str) -> String {
     format!(
         "tell application \"Terminal\"\nrepeat with w in windows\nrepeat with t in tabs of w\nif tty of t is {} then\n{body}\nreturn \"ok\"\nend if\nend repeat\nend repeat\nend tell\nreturn \"missing\"",
@@ -94,16 +115,16 @@ impl Platform for MacOs {
         osascript(&tab_script(tty, "set selected of t to true\nset index of w to 1\nactivate")).trim() == "ok"
     }
 
-    fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String> {
-        let env = match config {
-            Some(dir) => format!("CLAUDE_CONFIG_DIR={} ", sh_quote(&dir.to_string_lossy())),
-            None => "unset CLAUDE_CONFIG_DIR && ".into(),
-        };
-        // Terminal's shell may carry a Claude Code session's environment; see proc::SESSION_ENV.
+    fn open(&self, cwd: &str, argv: &[String]) -> Result<(), String> {
+        if !posix_typable(cwd) || argv.iter().any(|a| !posix_typable(a)) {
+            return Err("unsupported_path".into());
+        }
         // Terminal learns a tab's directory (what a new tab inherits) from the OSC 7 the shell prints at each prompt, so
-        // the cd needs a prompt of its own before claude takes the tab. It repeats on the second line to keep the guard.
+        // the cd needs a prompt of its own before the helper takes the tab. It repeats on the second line to keep the
+        // guard. The shell stays once claude exits.
         let dir = sh_quote(cwd);
-        let cmd = format!("cd {dir}\ncd {dir} && unset {} && {env}claude --resume {id}", crate::proc::SESSION_ENV.join(" "));
+        let line: Vec<String> = argv.iter().map(|a| sh_quote(a)).collect();
+        let cmd = format!("cd {dir}\ncd {dir} && {}", line.join(" "));
         osascript(&format!("tell application \"Terminal\"\ndo script {}\nactivate\nend tell", as_string(&cmd)));
         Ok(())
     }

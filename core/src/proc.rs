@@ -22,6 +22,12 @@ pub const SESSION_ENV: &[&str] = &[
     "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
 ];
 
+/// How the terminal Hangar may have been started from looks (an agent's tool shell sets NO_COLOR, another terminal
+/// its TERM_PROGRAM). A tab that inherits Hangar's environment would resume the session without color, or as if in
+/// that terminal; the new tab describes itself.
+#[cfg_attr(not(windows), allow(dead_code))] // macOS tabs get Terminal's environment, not Hangar's
+pub const TERMINAL_ENV: &[&str] = &["NO_COLOR", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"];
+
 /// A command for `bin`, without the environment of a Claude Code session Hangar may have been started from.
 /// A `.js` path runs under `node`, so the test fakes in test/bin work on every OS (Windows can't exec a shebang script).
 pub fn command(bin: &str) -> Command {
@@ -126,13 +132,22 @@ pub fn alive(pid: u32) -> bool {
     sys.process(p).is_some_and(|p| !matches!(p.status(), sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead))
 }
 
-/// SIGTERM where there are signals, so Claude Code can finish its writes; TerminateProcess on Windows.
+/// Asks the process to quit, so Claude Code can finish its writes and end its remote control session: SIGTERM where
+/// there are signals, Ctrl+Break to its console on Windows.
 pub fn terminate(pid: u32) {
     #[cfg(unix)]
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    if !crate::platform::windows::ctrl_break(pid) {
+        kill(pid);
+    }
+}
+
+/// Ends the process outright (TerminateProcess on Windows): for one that didn't quit when asked.
+#[cfg(windows)]
+pub fn kill(pid: u32) {
     {
         let mut sys = System::new();
         let p = Pid::from_u32(pid);

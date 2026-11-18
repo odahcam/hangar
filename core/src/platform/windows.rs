@@ -2,7 +2,7 @@
 // idle-tab cleanup here. A running session is still brought forward: its console's window leads to the terminal
 // window that hosts it, and UI Automation selects the tab whose title is that console's title.
 use super::{Caps, Platform, Tab};
-use crate::proc::{command, run, run_with, SESSION_ENV};
+use crate::proc::{command, run_with, TERMINAL_ENV};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -26,8 +26,10 @@ impl Platform for Windows {
         vec![home.join(".local/bin/claude.exe"), home.join(".claude/local/claude.exe")]
     }
 
+    // $PATH: searches only the PATH; a bare name would look in the current folder first (for the resume helper, the
+    // session's own repository).
     fn which_claude(&self) -> (String, Vec<String>) {
-        ("where.exe".into(), vec!["claude".into()])
+        ("where.exe".into(), vec!["$PATH:claude".into()])
     }
 
     fn tabs(&self) -> HashMap<String, Tab> {
@@ -51,30 +53,34 @@ impl Platform for Windows {
     }
 
     // A new tab in the most recent Windows Terminal window; without Windows Terminal, a console window of its own.
-    // wt splits its command line on ";", so one in the path is escaped. The tab gets the environment of the window
-    // it lands in, not ours, so the account is set by cmd inside the tab: `set X=` with nothing after it clears X.
-    // Unquoted, so a folder with a cmd metacharacter in its path can't be passed through.
-    fn open(&self, cwd: &str, id: &str, config: Option<&Path>) -> Result<(), String> {
-        let config_s = config.map(|d| d.to_string_lossy().to_string());
-        if config_s.as_deref().is_some_and(|d| d.contains(['&', '|', '<', '>', '^', '"', '%'])) {
-            return Err("unsupported_path".into());
-        }
+    // The tab runs the helper's command line itself, no shell, under the user's default profile: given a command
+    // without -p, Windows Terminal takes the profiles' common settings ("Default", no icon) instead, so the default
+    // profile is named. wt splits its command line on ";", so each one is escaped. The tab closes when claude exits.
+    fn open(&self, cwd: &str, argv: &[String]) -> Result<(), String> {
         let dir = cwd.replace(';', "\\;");
-        // The window may itself have been started from a Claude Code session; see proc::SESSION_ENV.
-        let clear: String = SESSION_ENV.iter().map(|k| format!("set {k}=&& ")).collect();
-        let cmd = format!("{clear}set CLAUDE_CONFIG_DIR={}&& claude --resume {id}", config_s.as_deref().unwrap_or("")).replace(';', "\\;");
-        let r = run(&WT, &["-w", "0", "new-tab", "--startingDirectory", &dir, "cmd", "/c", &cmd], Duration::from_secs(8));
+        let line: Vec<String> = argv.iter().map(|a| a.replace(';', "\\;")).collect();
+        // The tab inherits wt's environment, ours: without the look of the terminal Hangar may have been started from.
+        let mut wt = command(&WT);
+        for k in TERMINAL_ENV {
+            wt.env_remove(k);
+        }
+        wt.args(["-w", "0", "new-tab"]);
+        if let Some(p) = default_profile() {
+            wt.args(["-p", &p.replace(';', "\\;")]);
+        }
+        wt.args(["--startingDirectory", &dir]).args(&line);
+        let r = run_with(&mut wt, None, Duration::from_secs(8));
         if !r.missing {
             return Ok(());
         }
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_CONSOLE: u32 = 0x10;
-        let mut c = command("claude");
-        match config {
-            Some(d) => c.env("CLAUDE_CONFIG_DIR", d),
-            None => c.env_remove("CLAUDE_CONFIG_DIR"),
-        };
-        c.args(["--resume", id]).current_dir(cwd).creation_flags(CREATE_NEW_CONSOLE).spawn().map(drop).map_err(|e| e.to_string())
+        let (bin, args) = argv.split_first().ok_or("no command")?;
+        let mut c = command(bin);
+        for k in TERMINAL_ENV {
+            c.env_remove(k);
+        }
+        c.args(args).current_dir(cwd).creation_flags(CREATE_NEW_CONSOLE).spawn().map(drop).map_err(|e| e.to_string())
     }
 
     fn exit_tab(&self, _: &str, _: bool) {}
@@ -88,6 +94,24 @@ impl Platform for Windows {
     fn swap_used_mb(&self) -> f64 {
         win::pagefile_in_use_bytes().map_or(0.0, |b| b as f64 / 1048576.0)
     }
+}
+
+// The "defaultProfile" of Windows Terminal's settings (the Store build's, else Preview's, else the unpackaged one's).
+// The file allows comments, so the value is read as the first string after the key rather than parsed as JSON; a key
+// behind "//" on its line is a comment's.
+fn default_profile() -> Option<String> {
+    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    let files = [
+        local.join(r"Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"),
+        local.join(r"Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json"),
+        local.join(r"Microsoft\Windows Terminal\settings.json"),
+    ];
+    let text = files.iter().find_map(|f| std::fs::read_to_string(f).ok())?;
+    const KEY: &str = "\"defaultProfile\"";
+    let at = text.match_indices(KEY).map(|(i, _)| i).find(|&i| !text[text[..i].rfind('\n').map_or(0, |n| n + 1)..i].contains("//"))?;
+    let rest = &text[at + KEY.len()..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    Some(rest[..rest.find('"')?].to_string()).filter(|p| !p.is_empty() && !p.contains('\\'))
 }
 
 // The terminal window a session runs in. The console the process is attached to decides: walking up from it, the
@@ -145,6 +169,38 @@ fn select_tab(pid: u32, window: isize) {
     if !r.ok {
         eprintln!("hangar: no tab selected for pid {pid}: {}", r.err.trim());
     }
+}
+
+// Ctrl+Break to the console `pid` is attached to, from a PowerShell helper (attaching to another console means
+// letting go of one's own). Claude Code takes it as a quit: it exits 0 and cleans up after itself, ending its remote
+// control session too, which TerminateProcess skips. The event reaches every process of that console; PowerShell
+// (5.1 and 7) and the resume helper outlive it. The helper itself may die of it: the event is sent by then.
+const CTRL_BREAK: &str = r#"
+Add-Type -Namespace Hangar -Name Brk -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern bool FreeConsole();
+[DllImport("kernel32.dll")] public static extern bool AttachConsole(uint pid);
+[DllImport("kernel32.dll")] public static extern bool GenerateConsoleCtrlEvent(uint ev, uint group);
+'@
+[void][Hangar.Brk]::FreeConsole()
+if (-not [Hangar.Brk]::AttachConsole([uint32]$env:HANGAR_BREAK_PID)) { exit 2 }
+[void][Hangar.Brk]::GenerateConsoleCtrlEvent(1, 0)
+"#;
+
+/// Asks the session `pid` to quit as Ctrl+Break would; false when that couldn't be sent. Never to a session on this
+/// process's own console (hangar-server started from a terminal, with the session beside it): the event would reach
+/// that terminal's shell and whatever it runs, which a script-running PowerShell takes as "break into the debugger".
+pub(crate) fn ctrl_break(pid: u32) -> bool {
+    let mine = win::console_host(std::process::id());
+    if mine.is_some() && mine == win::console_host(pid) {
+        return false;
+    }
+    let script: Vec<u8> = CTRL_BREAK.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut c = command("powershell.exe");
+    c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &base64(&script)])
+        .env("HANGAR_BREAK_PID", pid.to_string());
+    // Exit code 2: no console to attach to. Anything else, the event went out (the helper may die of it).
+    let r = run_with(&mut c, None, Duration::from_secs(10));
+    !r.missing && !r.err.starts_with("exit 2:")
 }
 
 fn base64(bytes: &[u8]) -> String {

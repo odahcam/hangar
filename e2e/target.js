@@ -11,11 +11,26 @@ const { startServer, stopApp, BIN, ROOT, WIN32, waitFor } = require("../test/hel
 
 const APP = process.env.HANGAR_APP || path.join(ROOT, "target/debug", "hangar" + (WIN32 ? ".exe" : ""));
 
+// The desktop app's CSP, as the webview gets it: Tauri adds a nonce to script-src and style-src and puts it on the
+// page's <script> and <style> tags, and with a nonce present the browser ignores 'unsafe-inline' (style attributes
+// set as markup are dropped). The web target serves the page the same way, so what the CSP blocks shows here too;
+// only connect-src differs, the web page talking HTTP to its own origin instead of IPC.
+const NONCE = "e2e";
+const CSP = JSON.parse(fs.readFileSync(path.join(ROOT, "app/tauri.conf.json"), "utf8")).app.security.csp
+  .replace(/connect-src [^;]*/, "connect-src 'self'")
+  .replace(/(script-src|style-src) ([^;]*)/g, `$1 $2 'nonce-${NONCE}'`);
+
 async function launchWeb(w, env) {
   const srv = await startServer(w, env);
   return {
     ...srv,
-    async open(page) { await page.goto(srv.base + "/"); return page; },
+    async open(page) {
+      // The page the server would send, read from the same folder (HANGAR_WEB_DIR) rather than fetched again.
+      const html = fs.readFileSync(path.join(ROOT, "web", "index.html"), "utf8").replace(/<(script|style)>/g, `<$1 nonce="${NONCE}">`);
+      await page.route(srv.base + "/", (route) => route.fulfill({ contentType: "text/html; charset=utf-8", body: html, headers: { "content-security-policy": CSP } }));
+      await page.goto(srv.base + "/");
+      return page;
+    },
     // Every API call whose path starts with `prefix` waits `ms` first (0 = back to normal).
     async slow(page, ms, prefix = "/api/") {
       await page.unroute(`**${prefix}**`);

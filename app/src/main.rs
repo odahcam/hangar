@@ -2,12 +2,37 @@
 // in-process through the `api` command, the same router hangar-server exposes over HTTP to the tests.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use hangar_core::cloud::oauth::AuthError;
 use hangar_core::{Config, Hangar};
 use std::sync::Arc;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
+
+/// A hangar:// link: only the sign-in callback means anything, and the core accepts it only for the sign-in it is
+/// waiting for (state, issuer). On Windows the link arrives as the argument of a second instance, from anyone.
+fn open_link(app: &AppHandle, url: &str) {
+    if !url.starts_with(hangar_core::cloud::oauth::REDIRECT_URI) {
+        return;
+    }
+    let Some(cloud) = app.state::<Arc<Hangar>>().cloud() else { return };
+    let (app, url) = (app.clone(), url.to_string());
+    std::thread::spawn(move || {
+        let r = cloud.complete_login(&url);
+        // A link that isn't for the sign-in under way (any web page can open one) is dropped without a sound.
+        if matches!(&r, Err(AuthError::Invalid(e)) if ["state", "iss", "query", "callback"].contains(&e.as_str())) {
+            return;
+        }
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.set_focus();
+            let err = r.err().map(|e| e.to_string()).unwrap_or_default();
+            let _ = w.eval(format!("cloudLinked({})", serde_json::Value::String(err)));
+        }
+    });
+}
 
 /// The UI's whole API: `api(method, path, body)` resolves to the JSON body or rejects with its `error`.
 #[tauri::command(async)]
@@ -76,13 +101,36 @@ fn show_main(app: &AppHandle) {
 }
 
 fn main() {
+    // `Hangar --offer` / `--pair <code>`: a command that asks the running app (see core/src/cli.rs).
+    if let Some(code) = hangar_core::cli::client() {
+        std::process::exit(code);
+    }
     let hangar = Hangar::open(Config::from_env()).unwrap_or_else(|e| {
         eprintln!("hangar: {e}");
         std::process::exit(1);
     });
     hangar.spawn_background();
+    // Test instances run side by side on throwaway data: no single instance, no device identity in the real keychain.
+    let test_instance = std::env::var_os("HANGAR_WEBVIEW_DATA").is_some();
 
-    let mut app = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    let mut app = tauri::Builder::default();
+    if !test_instance {
+        // First: a second launch (on Windows, how a hangar:// link arrives; a pairing command) hands its arguments to
+        // this instance and quits.
+        app = app.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if hangar_core::cli::serve(&app.state::<Arc<Hangar>>(), &argv) {
+                return;
+            }
+            for a in argv.iter().skip(1) {
+                open_link(app, a);
+            }
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }));
+    }
+    let mut app = app.plugin(tauri_plugin_deep_link::init()).plugin(tauri_plugin_opener::init());
     // Off-screen test instances must neither restore nor overwrite the real window position.
     if std::env::var_os("HANGAR_WINDOW_OFFSCREEN").is_none() {
         app = app.plugin(tauri_plugin_window_state::Builder::default().build());
@@ -108,8 +156,33 @@ fn main() {
             }
             _ => {}
         })
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
+            // Remote control starts once this is the only instance: a second launch quits in the plugin above, before
+            // it could load the device identity or open a second link to the relay.
+            if !test_instance {
+                let hangar = app.state::<Arc<Hangar>>();
+                if let Err(e) = hangar.start_cloud() {
+                    eprintln!("cloud: {e}");
+                }
+                // Started by a pairing command when the app wasn't running.
+                hangar_core::cli::serve(&hangar, &std::env::args().collect::<Vec<_>>());
+            }
+            // macOS delivers links as events; on Windows the installer registers the scheme, and a dev build
+            // registers it here.
+            #[cfg(all(windows, debug_assertions))]
+            let _ = app.deep_link().register_all();
+            let links = handle.clone();
+            app.deep_link().on_open_url(move |e| {
+                for u in e.urls() {
+                    open_link(&links, u.as_str());
+                }
+            });
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                for u in urls {
+                    open_link(&handle, u.as_str());
+                }
+            }
             let (menu, login) = build_menu(&handle)?;
             app.set_menu(menu)?;
             app.manage(LoginItem(login));
