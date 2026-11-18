@@ -202,7 +202,16 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
 .remote-bar[hidden] { display: none; }
 .remote-bar .msg b { font-weight: 600; }
 .remote-bar .btn { background: var(--bg); color: var(--fg); border-color: transparent; }
-.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; background: var(--fg); color: var(--bg); font-size: 13px; padding: 8px 14px; border-radius: 6px; }
+/* A load that failed with a list already shown: it stays, said to be possibly out of date. */
+.stale-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; padding: 8px 8px 8px 12px;
+  background: var(--attention-soft); color: var(--attention); border-radius: 8px; font-size: 13px; }
+.empty .btn { margin-top: 10px; }
+.tiles > .stale-bar { grid-column: 1 / -1; margin: 0; }
+/* Messages stack at the bottom: one that went well leaves on its own, an error stays until dismissed. */
+.toasts { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: calc(100vw - 32px); }
+.toast { background: var(--fg); color: var(--bg); font-size: 13px; padding: 8px 14px; border-radius: 6px; display: flex; align-items: center; gap: 10px; }
+.toast.error { background: var(--danger); color: var(--surface); padding-right: 6px; }
+.toast button { font: 13px var(--sans); border: 0; background: none; color: inherit; cursor: pointer; padding: 2px 6px; border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -236,13 +245,14 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
     <label class="btn"><input type="checkbox" id="suggestedOnly"> <span data-i18n="suggestedOnly"></span></label>
     <button class="btn" id="checkNow" data-i18n="checkNow"></button>
   </div>
+  <div class="stale-bar" id="loadError" role="alert" hidden><span class="msg"></span><button class="btn" data-i18n="retry"></button></div>
   <div class="split" id="split">
     <ol id="list"></ol>
     <section class="detail" id="detail" aria-live="polite"></section>
   </div>
   <div class="empty" id="empty" hidden></div>
 </div>
-<div class="toast" id="toast" hidden></div>
+<div class="toasts" id="toast" aria-live="polite"></div>
 <script src="/i18n.js"></script>
 <script>
 for (const e of document.querySelectorAll("[data-i18n]")) e.textContent = t(e.dataset.i18n);
@@ -280,11 +290,15 @@ function showView(v) {
 // through the relay. Only what that machine lets a paired device do goes there (see core/src/remote.rs); everything
 // else, settings included, stays on this machine.
 let cloud = null, remote = null, machine = "", machineNames = {};
-/** The machine whose sessions were asked for after a switch, or at start, and haven't come yet (the list shows that
- * it's loading). */
-let loadingFrom = null;
+/** Whether the sessions of the machine shown have come, since start or the last switch: until then the list says
+ * they're on their way. */
+let loaded = false;
+/** Why the last load failed, until one works: with no list yet it takes the list's place, otherwise the list stays,
+ * said to be possibly out of date. Either way with a way to try again. */
+let loadError = null;
 try { machine = localStorage.getItem("machine") || ""; } catch {}
-loadingFrom = machine || null;
+// The other machines' names are remembered, so a list that comes (or fails) before they answer still names its machine.
+try { machineNames = JSON.parse(localStorage.getItem("machineNames")) || {}; } catch {}
 const REMOTE_OK = /^(GET \/api\/(sessions|accounts|machine)$|PATCH \/api\/session\/|POST \/api\/(order$|resume\/|close\/|dismiss-suggestion\/))/;
 // With another machine shown, anything outside that list is refused here rather than run on this machine: the
 // screen shows the other machine, and the same ~/.claude path exists on both.
@@ -305,13 +319,35 @@ async function apiLocal(method, path, body) {
   return j;
 }
 // Server error codes with a sentence of their own (err_<code> in i18n.js); others show as they are.
-function failed(e) { const k = "err_" + e.message, s = t(k); return t("failed", { msg: s === k ? e.message : s }); }
-async function act(fn, ok) { try { await fn(); if (ok) toast(ok); } catch (e) { toast(failed(e)); } await load(); }
+function reason(e) { const k = "err_" + e.message, s = t(k); return s === k ? e.message : s; }
+function failed(e) { return t("failed", { msg: reason(e) }); }
+// Why the sessions didn't come: this machine's core, or the other machine, by name (it may have answered, with an error).
+function loadProblem(e) {
+  if (!machine || e instanceof TypeError) return t("serverDown", { msg: reason(e) });
+  const name = machineName(machine);
+  return e.message === "machine_timeout" ? t("machineDown", { name }) : t("machineSaid", { name, msg: reason(e) });
+}
+// An action under way keeps its control busy, so it can't be sent twice; the reload that follows renders the outcome.
+async function act(fn, ok, control) {
+  if (control?.disabled) return;
+  if (control) { control.disabled = true; control.setAttribute("aria-busy", "true"); }
+  try { await fn(); if (ok) toast(ok); } catch (e) { toastError(failed(e)); }
+  await load();
+  if (control) { control.disabled = false; control.removeAttribute("aria-busy"); }
+}
+function actBtn(label, cls, fn, ok) { const b = btn(label, cls, () => act(fn, ok, b)); return b; }
+// Tries the load again from a button, busy until it's done.
+async function retry(b) {
+  b.disabled = true; b.setAttribute("aria-busy", "true");
+  await load();
+  b.disabled = false; b.removeAttribute("aria-busy");
+}
+function retryBtn() { const b = btn(t("retry"), "", () => retry(b)); return b; }
 
 // Edits apply to the local list and render at once; the request runs behind. A refused request reloads the
 // server's state (rolling the edit back). Once no request is in flight, a quiet reload picks up derived fields.
 let inFlight = 0, syncTimer;
-async function mutate(apply, request, { ok, rerender = true } = {}) {
+async function mutate(apply, request, { ok, rerender = true, quiet = false } = {}) {
   apply();
   if (rerender) render();
   refreshTiles();
@@ -320,7 +356,7 @@ async function mutate(apply, request, { ok, rerender = true } = {}) {
     await request();
     if (ok) toast(ok);
   } catch (e) {
-    toast(failed(e));
+    if (!quiet) toastError(failed(e));
     inFlight--;
     return load();
   }
@@ -343,7 +379,16 @@ function setStatus(s, status, via) {
   s.doneBy = status === "done" ? via || "user" : null;
   if (status === "done") s.suggestion = null;
 }
-function toast(m) { const el = $("#toast"); el.textContent = m; el.hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => el.hidden = true, 2200); }
+// Messages stack: one saying something went through leaves on its own; an error stays until dismissed (the same
+// error twice shows once).
+function toast(m) { const x = el("div", { class: "toast", role: "status", text: m }); $("#toast").append(x); setTimeout(() => x.remove(), 2200); }
+function toastError(m) {
+  if ([...document.querySelectorAll("#toast .error")].some((x) => x.firstChild.textContent === m)) return;
+  const close = el("button", { text: "✕", title: t("dismissToast"), "aria-label": t("dismissToast") });
+  const x = el("div", { class: "toast error", role: "alert" }, [el("span", { text: m }), close]);
+  close.onclick = () => x.remove();
+  $("#toast").append(x);
+}
 function ago(iso) {
   if (!iso) return "—";
   const d = (Date.now() - new Date(iso)) / 864e5;
@@ -407,6 +452,8 @@ function render() {
   $("#tabs").hidden = set; $("#tiles").hidden = set || !!machine; $("#checkNow").hidden = view !== "pending" || !!machine;
   $("#tabs [data-v=insights]").hidden = !!machine;
   $("#remoteBanner").hidden = !machine || set;
+  $("#loadError").hidden = !(loadError && loaded) || ins || set;
+  if (loadError) $("#loadError .msg").textContent = t("staleList", { msg: loadProblem(loadError) });
   if (machine) {
     const [before, after = ""] = t("controlling", { name: "\0" }).split("\0");
     $("#remoteBanner .msg").replaceChildren(before, el("b", { text: machineName(machine) }), after);
@@ -418,7 +465,7 @@ function render() {
   // Settings are this machine's: with another one shown, its accounts aren't listed here as if they could be edited.
   const local = machine ? [panel(t("pAccounts"), "", [el("div", { class: "meta", text: t("settingsLocalOnly", { name: machineName(machine) }) }),
     el("div", {}, [btn(t("showThisMachine"), "", showThisMachine)])])] : [accountsPanel(), classifierSettings()];
-  if (set) return $("#settings").replaceChildren(el("div", {}, [btn(t("back"), "", settingsBack)]), ...local, cloudPanel(), remotePanel());
+  if (set) return $("#settings").replaceChildren(...[el("div", {}, [btn(t("back"), "", settingsBack)]), ...local, cloudPanel(), remotePanel()].filter(Boolean));
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
   const acct = multi() ? $("#acct").value : "";
   const byPrompts = $("#sort").value === "prompt";
@@ -433,9 +480,10 @@ function render() {
   const list = base.filter((s) => [s, ...kinOf(s)].some(matches));
   // The selection follows the session; when it leaves the list (marked done, filtered out), the line that took its
   // place is selected. With nothing selected the panel shows the overview.
-  let sel = selectedId && byId(selectedId);
-  if (selectedId && (!sel || !list.some((s) => s === sel || s.family && s.family === sel.family))) sel = list[Math.min(selIndex, list.length - 1)] || null;
-  selectedId = sel?.id ?? null;
+  // (Before the list comes, the session remembered stays selected for when it does.)
+  let sel = loaded && selectedId ? byId(selectedId) : null;
+  if (loaded && selectedId && (!sel || !list.some((s) => s === sel || s.family && s.family === sel.family))) sel = list[Math.min(selIndex, list.length - 1)] || null;
+  if (loaded) selectedId = sel?.id ?? null;
   const selHead = sel && (isHead(sel) ? sel : heads.get(sel.family));
   if (selHead) selIndex = list.indexOf(selHead);
   // Rank = place among the sessions you prioritized, so it reads the same under any filter or sort.
@@ -447,9 +495,11 @@ function render() {
   $("#split").classList.toggle("detail-open", detailOpen && !!sel);
   $("#split").classList.toggle("none", !list.length);
   $("#empty").hidden = list.length > 0;
-  $("#empty").textContent = loadingFrom ? t("loadingFrom", { name: machineName(loadingFrom) }) : view === "pending" ? t("emptyPending") : t("emptyDone");
+  $("#empty").replaceChildren(...(loaded ? [view === "pending" ? t("emptyPending") : t("emptyDone")]
+    : loadError ? [el("div", { text: loadProblem(loadError) }), retryBtn()]
+    : [machine ? t("loadingFrom", { name: machineName(machine) }) : t("loadingSessions")]));
   const n = (f) => items.filter(f).length;
-  $("#counts").textContent = t("counts", {
+  $("#counts").textContent = !loaded ? (loadError ? "" : t("loading")) : t("counts", {
     pending: n((s) => isHead(s) && s.status !== "done"), suggested: n((s) => s.suggestion), untriaged: n((s) => isHead(s) && s.priority == null && s.status !== "done"),
     live: n((s) => s.live), done: n((s) => isHead(s) && s.status === "done"),
   });
@@ -484,12 +534,16 @@ async function settle(s, label, call, open, ok) {
   try {
     await call();
     if (ok) toast(ok);
+    let there = false;
     for (const end = Date.now() + SETTLE_MS; Date.now() < end;) {
       await load();
-      if (!!byId(s.id)?.live === open) break;
+      if (!!byId(s.id)?.live === open) { there = true; break; }
       await new Promise((r) => setTimeout(r, 700));
     }
-  } catch (e) { toast(failed(e)); await load(); }
+    // The call went through but the session never showed up open (or closed): said, rather than the button just
+    // coming back.
+    if (!there) toastError(t(open ? "notOpened" : "notClosed", { title: s.title, s: SETTLE_MS / 1000 }));
+  } catch (e) { toastError(failed(e)); await load(); }
   settling.delete(s.id);
   render();
 }
@@ -559,6 +613,8 @@ function row(s, rank, selected) {
   return li;
 }
 
+// A note whose save failed keeps what was typed in its field, with why, until a save works: session id → { text, error }.
+const noteDrafts = new Map();
 // The selected session: status and what to do first, then what it was about, your note, the facts, and the other
 // sessions of the same conversation.
 function detail(s) {
@@ -569,8 +625,15 @@ function detail(s) {
     return b;
   }));
   const note = el("textarea", { id: "note-" + s.id, placeholder: t("notePlaceholder"), rows: 2, "aria-label": t("noteLabel") });
-  note.value = s.note || "";
-  note.onchange = () => mutate(() => { s.note = note.value; }, () => api("PATCH", `/api/session/${s.id}`, { note: note.value }), { rerender: false });
+  const draft = noteDrafts.get(s.id);
+  const noteErr = el("div", { class: "warn", role: "alert", text: draft?.error, hidden: !draft });
+  note.value = draft ? draft.text : s.note || "";
+  note.onchange = () => {
+    const text = note.value;
+    mutate(() => { s.note = text; }, () => api("PATCH", `/api/session/${s.id}`, { note: text }).then(
+      () => { noteDrafts.delete(s.id); noteErr.hidden = true; },
+      (e) => { noteDrafts.set(s.id, { text, error: failed(e) }); throw e; }), { rerender: false, quiet: true });
+  };
   const fact = (k, v, attrs = {}) => v == null || v === "" ? null : el("div", {}, [el("div", { class: "k", text: t(k) }), el("div", { ...attrs, text: v })]);
   const cmd = `cd '${s.cwd}' && ${s.account && !acct?.default ? `CLAUDE_CONFIG_DIR='${s.account}' ` : ""}claude --resume ${s.id}`;
   const back = btn(t("backToList"), "back-list", () => { detailOpen = false; render(); document.querySelector("#list li.sel")?.focus(); });
@@ -607,6 +670,7 @@ function detail(s) {
     ]) : null,
     el("div", { class: "block" }, [el("div", { class: "k", text: t("lastPromptLabel") }), el("div", { class: "prompt", text: s.lastPrompt || "—" })]),
     el("label", { class: "block" }, [el("span", { class: "k", text: t("noteLabel") }), note]),
+    noteErr,
     el("div", { class: "facts" }, [
       s.status !== "done" && isHead(s) ? fact("fPriority", s.priority == null ? t("isNew") : String(triaged().indexOf(s.id) + 1)) : null,
       fact("fProject", shortProject(s.project), { class: "mono", title: s.cwd || s.project }),
@@ -646,7 +710,7 @@ function overview() {
     machine ? null : btn(t("allInsights"), "", () => showView("insights")),
   ]);
   if (machine) return [head];
-  if (!d) return [head, el("div", { class: "muted", text: t("loading") })];
+  if (!d) return [head, tilesError ? el("div", { class: "warn", text: t("loadFailed", { msg: reason(tilesError) }) }) : el("div", { class: "muted", text: t("loading") })];
   const section = (title, sub, kids) => el("div", { class: "block" }, [el("div", { class: "k" }, [title, sub ? el("small", { text: " · " + sub }) : null]), ...kids]);
 
   const idle = d.memory.sessions.filter((s) => s.idleHours >= 24);
@@ -825,7 +889,7 @@ async function checkNow(b) {
       if (Date.now() > end) throw new Error(t("checkSlow"));
     }
     toast(t("checkDone"));
-  } catch (e) { toast(failed(e)); }
+  } catch (e) { toastError(failed(e)); }
   b.disabled = false; b.removeAttribute("aria-busy"); b.textContent = t("checkNow");
   await load();
 }
@@ -854,8 +918,17 @@ function renderTiles(d) {
     tile(tot.suggestions, t("tileSuggestions", { auto: tot.autoDone, classified: tot.classified, cost: tot.classifyCostUsd.toFixed(3) })),
   ].filter(Boolean));
 }
+// With no insights yet, a fetch that fails says so in the tiles' place, with a way to try again, and the overview
+// stops saying they're loading. Once there are some, a failed refresh keeps them.
+let tilesError = null;
 async function loadTiles() {
-  try { renderTiles(await api("GET", "/api/insights")); } catch {}
+  try { const d = await api("GET", "/api/insights"); tilesError = null; renderTiles(d); } catch (e) {
+    tilesError = e;
+    if (lastInsights) return;
+    const b = btn(t("retry"), "", () => { b.disabled = true; b.setAttribute("aria-busy", "true"); loadTiles(); });
+    $("#tiles").replaceChildren(el("div", { class: "stale-bar" }, [el("span", { text: t("loadFailed", { msg: reason(e) }) }), b]));
+    if ($("#detail").classList.contains("overview") && !$("#split").hidden) $("#detail").replaceChildren(...overview().filter(Boolean));
+  }
 }
 
 // One row per Claude Code config folder. Name and color are the user's; a folder Hangar found on its own can be
@@ -875,19 +948,20 @@ function accountsPanel() {
     const keep = el("input", { type: "number", min: 1, step: 1, value: a.cleanupSet ? a.cleanupDays : null, placeholder: "30", "aria-label": t("keepDays") });
     keep.onchange = () => {
       const v = keep.value.trim() === "" ? null : Math.floor(Number(keep.value));
-      if (v !== null && !(v >= 1)) { keep.value = a.cleanupSet ? a.cleanupDays : ""; return toast(t("failed", { msg: t("err_cleanup_days") })); }
+      if (v !== null && !(v >= 1)) { keep.value = a.cleanupSet ? a.cleanupDays : ""; return toastError(t("failed", { msg: t("err_cleanup_days") })); }
       mutate(() => Object.assign(a, { cleanupDays: v ?? 30, cleanupSet: v !== null }),
         () => api("PATCH", "/api/account", { dir: a.dir, cleanupDays: v }), { rerender: false });
     };
-    const toggle = a.hidden ? btn(t("show"), "", () => act(() => api("PATCH", "/api/account", { dir: a.dir, hidden: false })))
-      : btn(a.added ? t("remove") : t("hide"), "", () => act(() => api("DELETE", "/api/account", { dir: a.dir })));
+    const toggle = a.hidden ? actBtn(t("show"), "", () => api("PATCH", "/api/account", { dir: a.dir, hidden: false }))
+      : actBtn(a.added ? t("remove") : t("hide"), "", () => api("DELETE", "/api/account", { dir: a.dir }));
     return el("div", { class: "a" + (a.hidden ? " off" : "") }, [color, name,
       el("div", {}, [el("div", { class: "dir", text: a.dir }), el("div", { class: "meta", text: a.hidden ? t("hiddenL") : t("acctCounts", stats(a.dir)) }),
         el("label", { class: "keep" }, [t("keepFor") + " ", keep, " " + t("keepUnit")])]), toggle]);
   });
   const input = el("input", { type: "text", placeholder: t("addFolderPlaceholder"), "aria-label": t("addFolder") });
-  const form = el("form", {}, [input, el("button", { class: "btn", type: "submit", text: t("addFolder") })]);
-  form.onsubmit = (e) => { e.preventDefault(); act(() => api("POST", "/api/accounts", { dir: input.value }), t("folderAdded")); };
+  const submit = el("button", { class: "btn", type: "submit", text: t("addFolder") });
+  const form = el("form", {}, [input, submit]);
+  form.onsubmit = (e) => { e.preventDefault(); act(() => api("POST", "/api/accounts", { dir: input.value }), t("folderAdded"), submit); };
   return panel(t("pAccounts"), t("pAccountsSub"), [el("div", { class: "accts" }, [...rows, form])]);
 }
 
@@ -926,7 +1000,7 @@ const machineName = (device) => machineNames[device] || short(device);
 // The sign-in page opens in the default browser: the desktop app hands any outside address to it (see main.rs).
 function openExternal(url) { if (window.__TAURI__) location.assign(url); else window.open(url, "_blank", "noopener"); }
 // Called by the desktop app once the browser sends the hangar:// link back.
-window.cloudLinked = (err) => { toast(err ? failed(new Error(err)) : t("signedIn")); load(); };
+window.cloudLinked = (err) => { err ? toastError(failed(new Error(err))) : toast(t("signedIn")); load(); };
 
 async function loadCloud() {
   try {
@@ -941,6 +1015,7 @@ async function loadCloud() {
     apiLocal("POST", "/api/cloud/call", { device: m.device, method: "GET", path: "/api/machine" })
       .then((r) => {
         machineNames[m.device] = r.name || short(m.device);
+        try { localStorage.setItem("machineNames", JSON.stringify(machineNames)); } catch {}
         machineOptions();
         if (!document.activeElement?.matches("input[type=text]")) render();
       }, () => {})
@@ -963,30 +1038,31 @@ function machineOptions() {
 function cloudPanel() {
   if (!cloud || cloud.link.state === "off") return null;
   const c = cloud, trust = c.trust?.state, kids = [];
-  const signIn = (path) => act(async () => openExternal((await apiLocal("POST", path)).url));
+  const signIn = (label, cls, path) => actBtn(label, cls, async () => openExternal((await apiLocal("POST", path)).url));
   if (c.link.state === "signed_out") {
-    kids.push(el("div", { class: "meta", text: t("cloudSignedOut") }), el("div", {}, [btn(t("signIn"), "", () => signIn("/api/cloud/login"))]));
+    kids.push(el("div", { class: "meta", text: t("cloudSignedOut") }), el("div", {}, [signIn(t("signIn"), "", "/api/cloud/login")]));
     return panel(t("pCloud"), t("pCloudSub"), kids);
   }
   kids.push(el("div", { class: "meta" }, [el("span", { text: c.link.state === "online" ? t("cloudOnline") : c.link.state === "retrying" ? t("cloudRetrying") : t("cloudConnecting") }),
     el("span", { text: t("thisDevice", { id: short(c.device) }) })]));
   const codeForm = (label) => {
     const input = el("input", { type: "text", maxlength: 9, placeholder: "ABC-123", "aria-label": t("pairCode"), autocomplete: "off" });
-    const form = el("form", {}, [input, el("button", { class: "btn", type: "submit", text: label })]);
-    form.onsubmit = (e) => { e.preventDefault(); act(() => apiLocal("POST", "/api/cloud/join", { code: input.value })); };
+    const submit = el("button", { class: "btn", type: "submit", text: label });
+    const form = el("form", {}, [input, submit]);
+    form.onsubmit = (e) => { e.preventDefault(); act(() => apiLocal("POST", "/api/cloud/join", { code: input.value }), null, submit); };
     return el("div", { class: "accts" }, [form]);
   };
   if (trust === "member") {
     kids.push(...c.machines.map((m) => el("div", { class: "meta" }, [
       el("span", { text: (m.me ? t("thisMachine") : machineName(m.device)) + (m.online ? "" : " " + t("offlineL")) }),
       el("span", { class: "dir", text: short(m.device) }),
-      btn(m.me ? t("leave") : t("remove"), "danger", () => act(() => apiLocal("POST", "/api/cloud/remove", { device: m.device }))),
+      actBtn(m.me ? t("leave") : t("remove"), "danger", () => apiLocal("POST", "/api/cloud/remove", { device: m.device })),
     ])));
     if (c.offer) kids.push(el("div", { class: "warn-box" }, [el("strong", { text: c.offer.slice(0, 3) + "-" + c.offer.slice(3) }), el("span", { text: t("offerHint") })]));
     // Who the last code let in, with a way back: someone else may have read the code first.
     if (c.joined) kids.push(el("div", { class: "warn-box" }, [el("span", { text: t("joinedNow", { id: short(c.joined) }) }),
-      el("div", {}, [btn(t("undo"), "danger", () => act(() => apiLocal("POST", "/api/cloud/remove", { device: c.joined })))])]));
-    kids.push(el("div", {}, [btn(t("addMachine"), "", () => act(() => apiLocal("POST", "/api/cloud/offer")))]));
+      el("div", {}, [actBtn(t("undo"), "danger", () => apiLocal("POST", "/api/cloud/remove", { device: c.joined }))])]));
+    kids.push(el("div", {}, [actBtn(t("addMachine"), "", () => apiLocal("POST", "/api/cloud/offer"))]));
   } else if (trust === "not_paired") {
     kids.push(el("div", { class: "meta", text: c.joining ? t("pairing") : t("notPaired") }), codeForm(t("pair")));
     if (c.joinRefused) kids.push(el("div", { class: "warn", text: t("pairRefused") }));
@@ -994,9 +1070,9 @@ function cloudPanel() {
     kids.push(el("div", { class: "warn", text: t("refusedChain", { why: c.trust.reason }) }), codeForm(t("pairAgain")));
     if (c.joinRefused) kids.push(el("div", { class: "warn", text: t("pairRefused") }));
     kids.push(el("div", { class: "meta", text: c.reset ? t("resetPending", { at: new Date(c.reset).toLocaleString() }) : t("recoverHint") }),
-      el("div", {}, [btn(t("recover"), "danger", () => signIn("/api/cloud/recover"))]));
+      el("div", {}, [signIn(t("recover"), "danger", "/api/cloud/recover")]));
   }
-  kids.push(el("div", {}, [btn(t("signOut"), "", () => act(() => apiLocal("POST", "/api/cloud/logout")))]));
+  kids.push(el("div", {}, [actBtn(t("signOut"), "", () => apiLocal("POST", "/api/cloud/logout"))]));
   return panel(t("pCloud"), c.account ? t("pCloudAccount", { id: short(c.account) }) : t("pCloudSub"), kids);
 }
 
@@ -1005,7 +1081,7 @@ function remotePanel() {
   if (!cloud || cloud.link.state === "off" || !remote) return null;
   const box = el("input", { type: "checkbox" });
   box.checked = remote.enabled;
-  box.onchange = () => act(() => apiLocal("PATCH", "/api/remote", { enabled: box.checked }));
+  box.onchange = () => act(() => apiLocal("PATCH", "/api/remote", { enabled: box.checked }), null, box);
   const rows = remote.log.slice(0, 10).map((e) => el("div", { class: "meta" }, [el("span", { text: clock(e.at) }), el("span", { text: machineName(e.device) }), el("span", { text: `${e.method} ${e.path}` })]));
   const denied = remote.denied.slice(0, 5).map((e) => el("div", { class: "meta warn" }, [el("span", { text: clock(e.at) }), el("span", { text: machineName(e.device) }),
     el("span", { text: t("deniedRow", { what: `${e.method} ${e.path}`, n: e.count }) })]));
@@ -1014,8 +1090,14 @@ function remotePanel() {
 }
 
 async function loadInsights() {
+  // Until the first answer (or after a failure) there's nothing to show: it says it's loading.
+  if (!$("#insights .panel")) $("#insights").replaceChildren(el("div", { class: "empty", text: t("loading") }));
   let d;
-  try { d = await api("GET", "/api/insights"); } catch (e) { $("#insights").replaceChildren(el("div", { class: "empty", text: t("loadFailed", { msg: e.message }) })); return; }
+  try { d = await api("GET", "/api/insights"); } catch (e) {
+    const b = btn(t("retry"), "", () => loadInsights());
+    $("#insights").replaceChildren(el("div", { class: "empty" }, [el("div", { text: t("loadFailed", { msg: reason(e) }) }), b]));
+    return;
+  }
   renderTiles(d);
   const tot = d.totals, m = d.memory;
   $("#counts").textContent = t("countsShort", { pending: tot.pending, live: tot.live, done: tot.done });
@@ -1101,21 +1183,25 @@ async function loadInsights() {
 // Each load has a generation: only the latest one's answer is shown, so a slow machine's list can't land over the
 // machine picked after it.
 let loadGen = 0;
+const PALETTE = ["#2b7bd6", "#b7791f", "#8a4fbf", "#14866a", "#c2410c", "#5b6b7a"];
 async function load() {
   const was = machine, gen = ++loadGen;
   let got;
   try { got = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/accounts"), machine ? null : api("GET", "/api/classifier"), loadCloud()]); } catch (e) {
     if (gen !== loadGen) return;
-    const msg = machine ? t("machineDown", { name: machineName(machine), msg: failed(e) }) : t("serverDown", { msg: e.message });
-    $("#counts").textContent = msg;
-    if (loadingFrom) { loadingFrom = null; render(); $("#empty").textContent = msg; }
+    loadError = e;
+    if (view === "pending" || view === "done") render();
     return;
   }
   if (gen !== loadGen) return;
   // The machine shown went away from the account meanwhile: show this one's sessions instead.
   if (machine !== was) return load();
   [items, accounts, classifier] = got;
-  loadingFrom = null;
+  // A color goes into style, and another machine's accounts can say anything: one that isn't a plain hex color
+  // takes the palette's (the same as core/src/accounts.rs).
+  accounts.forEach((a, i) => { if (!/^#[0-9a-f]{6}$/i.test(a.color)) a.color = PALETTE[i % PALETTE.length]; });
+  loaded = true;
+  loadError = null;
   const sel = $("#proj"), cur = sel.value;
   sel.replaceChildren(el("option", { value: "", text: t("allProjects") }), ...[...new Set(items.map((s) => s.project).filter(Boolean))].sort().map((p) => el("option", { value: p, text: p })));
   sel.value = cur;
@@ -1137,7 +1223,8 @@ function switchMachine(next) {
   try { machine ? localStorage.setItem("machine", machine) : localStorage.removeItem("machine"); } catch {}
   selectedId = null;
   items = [];
-  loadingFrom = machine || null;
+  loaded = false;
+  loadError = null;
   if (machine && view === "insights") return showView("pending"), load();
   render();
   load();
@@ -1165,6 +1252,9 @@ $("#liveOnly").onchange = render;
 $("#suggestedOnly").onchange = render;
 $("#checkNow").onclick = (e) => checkNow(e.currentTarget);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && !document.activeElement?.matches("textarea")) load(); });
+$("#loadError button").onclick = (e) => retry(e.currentTarget);
+// The list says its sessions are on their way before the first answer (Insights renders once the load is in).
+if (view !== "insights") render();
 load();
 </script>
 </body>

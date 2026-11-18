@@ -1,40 +1,43 @@
-// The UI showing another machine's sessions: the relay and that machine are stood in for at the HTTP boundary
-// (/api/cloud*), so this runs in the web target only; test/cloud.test.js covers the real path.
+// The UI showing another machine's sessions: the relay and that machine are stood in for at the core's boundary
+// (/api/cloud*, see target.js), so this runs on either target; test/cloud.test.js covers the real path.
 const { test, expect } = require("@playwright/test");
 const { DARWIN, makeWorld, addSession, addLive, cleanup } = require("../test/helpers");
 const { launch } = require("./target");
 
 let w, srv;
-// A skipped test (the desktop target) makes no world.
 test.afterEach(async () => { await srv?.stop(); srv = null; if (w) cleanup(w); w = null; });
 
+// The account's machines (this one, then `others`), remote control off here, and calls to another machine answered by
+// `call(device, method, path)`, or else by this test's world as if it were that machine.
+function machines(others, call) {
+  return srv.intercept(null, async ({ path, body }) => {
+    if (path === "/api/cloud") return { json: { link: { state: "online" }, trust: { state: "member" },
+      machines: [{ device: "me-device", me: true, online: true }, ...others.map((device) => ({ device, me: false, online: true }))] } };
+    if (path === "/api/remote") return { json: { enabled: false } };
+    if (path !== "/api/cloud/call") return null;
+    const a = await call(body.device, body.method, body.path);
+    if (a) return a;
+    // The page keeps polling after the test, while afterEach stops the core: those calls just fail.
+    try { const res = await srv.api(body.method, body.path); return { status: res.status, json: res.json }; }
+    catch { return { status: 500, json: { error: "stopped" } }; }
+  });
+}
+
 test("resuming a session of another machine says where it opens, and confirms it", async ({ page }) => {
-  test.skip(test.info().project.name !== "web", "stands in for the relay over HTTP");
   w = makeWorld();
   const closed = addSession(w, { cwd: "/w/acme/api", agentName: "Rate limiter", turns: [{ user: "add buckets" }] });
   const open = addSession(w, { cwd: "/w/acme/web", agentName: "Checkout redesign", turns: [{ user: "ship it" }] });
   addLive(w, open);
   srv = await launch(w);
   const calls = [];
-  await page.route("**/api/cloud", (r) => r.fulfill({ json: {
-    link: { state: "online" }, trust: { state: "member" },
-    machines: [{ device: "me-device", me: true, online: true }, { device: "studio-device", me: false, online: true }],
-  } }));
-  await page.route("**/api/remote", (r) => r.fulfill({ json: { enabled: false } }));
   // The other machine answers from this test's world: its sessions, and an accepted resume.
-  await page.route("**/api/cloud/call", async (r) => {
-    const { method, path } = r.request().postDataJSON();
+  await machines(["studio-device"], (device, method, path) => {
     calls.push(`${method} ${path}`);
-    if (path === "/api/machine") return r.fulfill({ json: { name: "Studio" } });
-    if (path.startsWith("/api/resume/")) return r.fulfill({ json: { ok: true } });
-    // The page keeps polling after the test, while afterEach stops the server: those calls just fail.
-    try {
-      const res = await srv.api(method, path);
-      return await r.fulfill({ status: res.status, json: res.json });
-    } catch { return r.abort().catch(() => {}); }
+    if (path === "/api/machine") return { json: { name: "Studio" } };
+    if (path.startsWith("/api/resume/")) return { json: { ok: true } };
   });
-  await page.addInitScript(() => localStorage.setItem("machine", "studio-device"));
-  await srv.open(page);
+  await srv.init(page, () => localStorage.setItem("machine", "studio-device"));
+  page = await srv.open(page);
 
   const row = (title) => page.locator("#list li", { has: page.locator(".title", { hasText: title }) });
   await row("Rate limiter").locator(".title").click();
@@ -54,29 +57,21 @@ test("resuming a session of another machine says where it opens, and confirms it
 // Picking another machine empties the list at once and says whose sessions are coming: nothing of the machine left
 // stays on screen while the next one answers. The bar on top names the machine and leads back.
 test("switching machines shows the next one loading, never the last one's sessions", async ({ page }) => {
-  test.skip(test.info().project.name !== "web", "stands in for the relay over HTTP");
   w = makeWorld();
   addSession(w, { cwd: "/w/acme/api", agentName: "Rate limiter", turns: [{ user: "add buckets" }] });
   srv = await launch(w);
-  await page.route("**/api/cloud", (r) => r.fulfill({ json: {
-    link: { state: "online" }, trust: { state: "member" },
-    machines: [{ device: "me-device", me: true, online: true }, { device: "studio-device", me: false, online: true }],
-  } }));
-  await page.route("**/api/remote", (r) => r.fulfill({ json: { enabled: false } }));
   // Studio's list is this world's under other titles, and only comes once the test lets it.
   let release;
   const held = new Promise((r) => { release = r; });
-  await page.route("**/api/cloud/call", async (r) => {
-    const { method, path } = r.request().postDataJSON();
-    if (path === "/api/machine") return r.fulfill({ json: { name: "Studio" } });
-    if (path === "/api/sessions") await held;
-    try {
+  await machines(["studio-device"], async (device, method, path) => {
+    if (path === "/api/machine") return { json: { name: "Studio" } };
+    if (path === "/api/sessions") {
+      await held;
       const res = await srv.api(method, path);
-      const json = path === "/api/sessions" ? res.json.map((s) => ({ ...s, title: `Studio ${s.title}` })) : res.json;
-      return await r.fulfill({ status: res.status, json });
-    } catch { return r.abort().catch(() => {}); }
+      return { json: res.json.map((s) => ({ ...s, title: `Studio ${s.title}` })) };
+    }
   });
-  await srv.open(page);
+  page = await srv.open(page);
   const titles = page.locator("#list li .title");
   await expect(titles).toHaveText(["Rate limiter"]);
 
@@ -98,33 +93,21 @@ test("switching machines shows the next one loading, never the last one's sessio
 // Opening on another machine (a reload, a restart) says its sessions are coming, and a third machine slow to say its
 // name doesn't hold them back.
 test("a machine slow to answer doesn't hold back the sessions of the one shown", async ({ page }) => {
-  test.skip(test.info().project.name !== "web", "stands in for the relay over HTTP");
   w = makeWorld();
   addSession(w, { cwd: "/w/acme/api", agentName: "Rate limiter", turns: [{ user: "add buckets" }] });
   srv = await launch(w);
-  await page.route("**/api/cloud", (r) => r.fulfill({ json: {
-    link: { state: "online" }, trust: { state: "member" },
-    machines: [{ device: "me-device", me: true, online: true }, { device: "studio-device", me: false, online: true },
-      { device: "laptop-device", me: false, online: true }],
-  } }));
-  await page.route("**/api/remote", (r) => r.fulfill({ json: { enabled: false } }));
   let release, sessions;
   const held = new Promise((r) => { release = r; });
   const listed = new Promise((r) => { sessions = r; });
-  await page.route("**/api/cloud/call", async (r) => {
-    const { device, method, path } = r.request().postDataJSON();
+  await machines(["studio-device", "laptop-device"], async (device, method, path) => {
     if (path === "/api/machine") {
       if (device === "laptop-device") await held;
-      return r.fulfill({ json: { name: device === "studio-device" ? "Studio" : "Laptop" } });
+      return { json: { name: device === "studio-device" ? "Studio" : "Laptop" } };
     }
     if (path === "/api/sessions") await listed;
-    try {
-      const res = await srv.api(method, path);
-      return await r.fulfill({ status: res.status, json: res.json });
-    } catch { return r.abort().catch(() => {}); }
   });
-  await page.addInitScript(() => localStorage.setItem("machine", "studio-device"));
-  await srv.open(page);
+  await srv.init(page, () => localStorage.setItem("machine", "studio-device"));
+  page = await srv.open(page);
   await expect(page.locator("#empty")).toHaveText("Loading the sessions of Studio…");
   sessions();
   await expect(page.locator("#list li .title")).toHaveText(["Rate limiter"]);

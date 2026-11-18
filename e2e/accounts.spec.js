@@ -44,6 +44,8 @@ test("a session started in the wrong account moves to the right one", async () =
 
 test("how long each account keeps its transcripts is set in Settings", async () => {
   await page.getByRole("button", { name: "Settings" }).click();
+  // Remote control isn't running here: its panels are left out, not written as "null".
+  await expect(page.locator("#settings")).not.toContainText("null");
   const keep = page.getByRole("spinbutton", { name: "Days to keep transcripts" });
   await keep.nth(0).fill("365");
   await keep.nth(0).press("Enter");
