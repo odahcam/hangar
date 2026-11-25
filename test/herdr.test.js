@@ -77,6 +77,16 @@ test("Resume and the global restore type into the recovered terminal instead of 
   assert.equal(sends().length, 2);
 });
 
+test("a session that started after the last scan is restored too", async () => {
+  setTerms([]);
+  srv = await start();
+  const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
+  setTerms([{ address: "t1", pid: 4242, fg: 4242, labels: { [SESSION]: s.id, [PID]: "1" } }]);
+  const r = await srv.api("POST", "/api/restore-herdr");
+  assert.deepEqual(r.json, { restored: [{ terminal: "t1", session: s.id }], failed: [] });
+  assert.deepEqual(sends().map((c) => c.args[2]), [lineFor(s)]);
+});
+
 test("a shell it can't type into is reported, not typed into", async () => {
   const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
   setTerms([{ address: "t1", pid: 4242, fg: 5000, labels: { [SESSION]: s.id, [PID]: "1" } }]);

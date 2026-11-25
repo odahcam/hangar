@@ -173,8 +173,12 @@ impl Hangar {
         let id = t.noted_session().unwrap_or_default().to_string();
         run(bin, &["label", &t.addr, &format!("{PID}={}", t.pid)], HC_WAIT);
         // A session that started after the last scan isn't in the catalog yet.
+        // The scan's lock goes before resume_line takes it again: a guard kept to the end of one expression deadlocks.
         let line = match self.resume_line(&id) {
-            Err(ApiError(404, _)) => self.scan_all(&self.db()).map_err(ApiError::from).and_then(|_| self.resume_line(&id)),
+            Err(ApiError(404, _)) => {
+                let scanned = self.scan_all(&self.db()).map_err(ApiError::from);
+                scanned.and_then(|_| self.resume_line(&id))
+            }
             r => r,
         };
         let (cwd, argv) = line.map_err(|ApiError(_, e)| e)?;
