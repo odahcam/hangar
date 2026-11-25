@@ -8,6 +8,9 @@
 // {"exit": code} to end. The code never travels in arguments, which other local users can see (ps, and on macOS the
 // plugin's socket in /tmp). Only a local process can pass arguments, unlike a hangar:// link, which any web page
 // can open.
+//
+// `Hangar --restore` goes the same way: the running app restores the Claude sessions herdr's recovered terminals lost
+// (see herdr.rs) and prints each one.
 use crate::Hangar;
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
@@ -26,15 +29,18 @@ const READY_WAIT: Duration = Duration::from_secs(30);
 const PAIR_WAIT: Duration = Duration::from_secs(60);
 /// How long an accepted code's device may take to be in the chain.
 const ADD_WAIT: Duration = Duration::from_secs(15);
+/// Each restore waits for hc to type into a terminal, up to its 60 s hold on a person's unfinished draft.
+const RESTORE_WAIT: Duration = Duration::from_secs(300);
 
 enum Request {
     Offer,
     Pair(String),
+    Restore,
 }
 
-/// The pairing command a launch's arguments name, if any.
+/// The command a launch's arguments name, if any.
 fn command(argv: &[String]) -> Option<&'static str> {
-    ["--offer", "--pair"].into_iter().find(|c| argv.get(1).is_some_and(|a| a == c))
+    ["--offer", "--pair", "--restore"].into_iter().find(|c| argv.get(1).is_some_and(|a| a == c))
 }
 
 impl Request {
@@ -42,6 +48,7 @@ impl Request {
         match self {
             Request::Offer => json!({ "offer": true }),
             Request::Pair(code) => json!({ "pair": code }),
+            Request::Restore => json!({ "restore": true }),
         }
         .to_string()
     }
@@ -52,6 +59,7 @@ impl Request {
         match command {
             "--offer" if v["offer"] == true => Some(Request::Offer),
             "--pair" => Some(Request::Pair(v["pair"].as_str()?.to_string())),
+            "--restore" if v["restore"] == true => Some(Request::Restore),
             _ => None,
         }
     }
@@ -75,14 +83,16 @@ pub fn client() -> Option<i32> {
             }
             Request::Pair(code.trim().to_string())
         }
+        ("--restore", 2) => Request::Restore,
         _ => {
-            eprintln!("usage: Hangar --offer | Hangar --pair (the code on stdin)");
+            eprintln!("usage: Hangar --offer | Hangar --pair (the code on stdin) | Hangar --restore");
             return Some(2);
         }
     };
     let wait = match req {
         Request::Offer => OFFER_WAIT + ADD_WAIT + READY_WAIT,
         Request::Pair(_) => PAIR_WAIT + READY_WAIT,
+        Request::Restore => RESTORE_WAIT,
     };
     Some(run_client(cmd, &req, wait))
 }
@@ -207,6 +217,21 @@ pub fn serve(hangar: &Arc<Hangar>, argv: &[String]) -> bool {
 }
 
 fn answer(hangar: &Hangar, req: Request, say: &mut dyn FnMut(&str)) -> Result<(), String> {
+    if let Request::Restore = req {
+        let r = hangar.handle("POST", "/api/restore-herdr", "");
+        if r.status >= 400 {
+            return Err(r.body["error"].as_str().unwrap_or("restore_failed").to_string());
+        }
+        let line = |v: &Value| format!("{} {}", v["terminal"].as_str().unwrap_or(""), v["session"].as_str().unwrap_or(""));
+        for v in r.body["restored"].as_array().into_iter().flatten() {
+            say(&format!("restored: {}", line(v)));
+        }
+        let failed = r.body["failed"].as_array().cloned().unwrap_or_default();
+        for v in &failed {
+            say(&format!("failed: {} ({})", line(v), v["error"].as_str().unwrap_or("")));
+        }
+        return if failed.is_empty() { Ok(()) } else { Err(format!("{} not restored", failed.len())) };
+    }
     let cloud = hangar.cloud().ok_or("cloud_off")?;
     let status = || cloud.status();
     let ready = wait(READY_WAIT, || {
@@ -240,6 +265,7 @@ fn answer(hangar: &Hangar, req: Request, say: &mut dyn FnMut(&str)) -> Result<()
             .unwrap_or(Err("code_expired".into()))
             .map(|d| say(&format!("joined: {d}")))
         }
+        Request::Restore => Ok(()),
         Request::Pair(code) => {
             cloud.join(&code)?;
             wait(PAIR_WAIT, || {

@@ -244,6 +244,7 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
     <label class="btn"><input type="checkbox" id="liveOnly"> <span data-i18n="openOnly"></span></label>
     <label class="btn"><input type="checkbox" id="suggestedOnly"> <span data-i18n="suggestedOnly"></span></label>
     <button class="btn" id="checkNow" data-i18n="checkNow"></button>
+    <button class="btn primary" id="restoreHerdr" hidden></button>
   </div>
   <div class="stale-bar" id="loadError" role="alert" hidden><span class="msg"></span><button class="btn" data-i18n="retry"></button></div>
   <div class="split" id="split">
@@ -290,6 +291,21 @@ function showView(v) {
 // through the relay. Only what that machine lets a paired device do goes there (see core/src/remote.rs); everything
 // else, settings included, stays on this machine.
 let cloud = null, remote = null, machine = "", machineNames = {};
+// herdr terminals that lost their Claude session to a restart (GET /api/herdr), this machine's only. Asked for apart
+// from the list: it asks hc about every terminal, and the list doesn't wait for that.
+let herdr = null;
+function loadHerdr() {
+  return api("GET", "/api/herdr").then((h) => {
+    herdr = h;
+    renderRestore();
+    if (view === "settings" && !document.activeElement?.matches("#herdrPath")) render();
+  }, () => {});
+}
+function renderRestore() {
+  const b = $("#restoreHerdr"), lost = machine ? 0 : herdr?.restorable?.length || 0;
+  b.hidden = !lost || view === "insights" || view === "settings";
+  if (lost && !b.disabled) b.textContent = t("restoreHerdr", { n: lost });
+}
 /** Whether the sessions of the machine shown have come, since start or the last switch: until then the list says
  * they're on their way. */
 let loaded = false;
@@ -450,6 +466,7 @@ function render() {
   $("#insights").hidden = !ins; $("#settings").hidden = !set; $("#toolbar").hidden = ins || set; $("#split").hidden = ins || set;
   // Another machine shows its sessions only: insights, tiles and done detection are this machine's.
   $("#tabs").hidden = set; $("#tiles").hidden = set || !!machine; $("#checkNow").hidden = view !== "pending" || !!machine;
+  renderRestore();
   $("#tabs [data-v=insights]").hidden = !!machine;
   $("#remoteBanner").hidden = !machine || set;
   $("#loadError").hidden = !(loadError && loaded) || ins || set;
@@ -464,7 +481,7 @@ function render() {
   if (ins) return loadInsights();
   // Settings are this machine's: with another one shown, its accounts aren't listed here as if they could be edited.
   const local = machine ? [panel(t("pAccounts"), "", [el("div", { class: "meta", text: t("settingsLocalOnly", { name: machineName(machine) }) }),
-    el("div", {}, [btn(t("showThisMachine"), "", showThisMachine)])])] : [accountsPanel(), classifierSettings()];
+    el("div", {}, [btn(t("showThisMachine"), "", showThisMachine)])])] : [accountsPanel(), classifierSettings(), herdrSettings()];
   if (set) return $("#settings").replaceChildren(...[el("div", {}, [btn(t("back"), "", settingsBack)]), ...local, cloudPanel(), remotePanel()].filter(Boolean));
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
   const acct = multi() ? $("#acct").value : "";
@@ -994,6 +1011,31 @@ function classifierSettings() {
   ]);
 }
 
+// herdr: the integration on or off, restoring on its own or only when asked, and the hc to call.
+function herdrSettings() {
+  if (!herdr) return null;
+  const save = (patch, control) => act(() => api("PATCH", "/api/herdr", patch).then(loadHerdr), null, control);
+  const on = el("input", { type: "checkbox", id: "herdrOn" });
+  on.checked = herdr.enabled;
+  on.onchange = () => save({ enabled: on.checked }, on);
+  const auto = el("select", { id: "herdrAuto", "aria-label": t("herdrAfter") }, [el("option", { value: "1", text: t("herdrAuto") }), el("option", { value: "0", text: t("herdrManual") })]);
+  auto.value = herdr.auto ? "1" : "0";
+  auto.disabled = !herdr.enabled;
+  auto.onchange = () => save({ auto: auto.value === "1" }, auto);
+  const path = el("input", { type: "text", id: "herdrPath", placeholder: t("herdrPathAuto"), "aria-label": t("herdrPath") });
+  path.value = herdr.hcPath;
+  path.onchange = () => save({ hcPath: path.value }, path);
+  const hook = el("input", { type: "checkbox", disabled: "" });
+  return panel(t("pHerdr"), t("pHerdrSub"), [
+    el("label", { class: "btn" }, [on, " " + t("herdrOn")]),
+    el("label", { class: "transfer" }, [t("herdrAfter") + " ", auto]),
+    el("label", { class: "transfer" }, [t("herdrPath") + " ", path]),
+    herdr.enabled ? el("div", { id: "herdrHc", class: herdr.available ? "meta" : "meta warn",
+      text: t(herdr.available ? "herdrFound" : "herdrMissing", { path: herdr.hc || "hc" }) }) : null,
+    el("label", { class: "btn", "aria-disabled": "true" }, [hook, " " + t("herdrHook") + " (" + t("soon") + ")"]),
+  ]);
+}
+
 // --- Remote control: the odahcam account, this machine's place among its machines, and pairing.
 const short = (device) => device ? device.slice(0, 8) : "";
 const machineName = (device) => machineNames[device] || short(device);
@@ -1197,6 +1239,8 @@ async function load() {
   // The machine shown went away from the account meanwhile: show this one's sessions instead.
   if (machine !== was) return load();
   [items, accounts, classifier] = got;
+  // After the list's own calls, not beside them: the browser's six connections to the server are theirs first.
+  if (!machine) loadHerdr();
   // A color goes into style, and another machine's accounts can say anything: one that isn't a plain hex color
   // takes the palette's (the same as core/src/accounts.rs).
   accounts.forEach((a, i) => { if (!/^#[0-9a-f]{6}$/i.test(a.color)) a.color = PALETTE[i % PALETTE.length]; });
@@ -1251,6 +1295,15 @@ $("#sortDir").onclick = () => { sortRev = !sortRev; saveSort(); };
 $("#liveOnly").onchange = render;
 $("#suggestedOnly").onchange = render;
 $("#checkNow").onclick = (e) => checkNow(e.currentTarget);
+$("#restoreHerdr").onclick = async (e) => {
+  const b = e.currentTarget;
+  b.textContent = t("restoring");
+  await act(async () => {
+    const r = await api("POST", "/api/restore-herdr");
+    if (r.failed?.length) throw new Error(t("restoreFailed", { n: r.failed.length, msg: r.failed[0].error }));
+  }, t("restoredHerdr"), b);
+  render();
+};
 document.addEventListener("visibilitychange", () => { if (!document.hidden && !document.activeElement?.matches("textarea")) load(); });
 $("#loadError button").onclick = (e) => retry(e.currentTarget);
 // The list says its sessions are on their way before the first answer (Insights renders once the load is in).

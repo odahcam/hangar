@@ -204,7 +204,7 @@ impl Hangar {
     }
 
     pub(crate) fn resume(&self, id: &str) -> ApiResult {
-        let t = db::get_t(&self.db(), id)?.ok_or_else(|| ApiError(404, "unknown_session".into()))?;
+        db::get_t(&self.db(), id)?.ok_or_else(|| ApiError(404, "unknown_session".into()))?;
         let live = self.live_sessions().remove(id);
         if let Some(tty) = live.as_ref().and_then(|l| l.tty.as_ref()) {
             if self.platform.focus(tty) {
@@ -217,6 +217,22 @@ impl Hangar {
         if live.is_some() && !(caps.focus && caps.tabs) {
             return Err(ApiError(409, "already_open".into()));
         }
+        // A herdr terminal that lost this session to a restart gets it back in place, in its own pane.
+        if live.is_none() {
+            if let Some(r) = self.herdr_resume(id) {
+                return r;
+            }
+        }
+        let (cwd, argv) = self.resume_line(id)?;
+        self.platform.open(&cwd, &argv).map_err(|e| ApiError(500, e))?;
+        Ok(json!({ "opened": true }))
+    }
+
+    /// The folder and command line that resume session `id` (see resume.rs), its transcript put back from the backup
+    /// when it is gone.
+    pub(crate) fn resume_line(&self, id: &str) -> ApiResult<(String, Vec<String>)> {
+        let t = db::get_t(&self.db(), id)?.ok_or_else(|| ApiError(404, "unknown_session".into()))?;
+        let live = self.live_sessions().remove(id);
         let saved = self.backup_dir.join(format!("{id}.jsonl"));
         let file = Path::new(&t.file);
         if !file.exists() && saved.exists() {
@@ -243,8 +259,7 @@ impl Hangar {
             return Err(ApiError(409, "unsupported_id".into()));
         }
         let argv = crate::resume::argv(id, config).ok_or_else(|| ApiError(500, "no_resume_helper".into()))?;
-        self.platform.open(&cwd, &argv).map_err(|e| ApiError(500, e))?;
-        Ok(json!({ "opened": true }))
+        Ok((cwd, argv))
     }
 
     /// Copies a session into another account: its transcript, its subagent/tool-result folder, file history and

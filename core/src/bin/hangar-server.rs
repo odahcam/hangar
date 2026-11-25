@@ -26,6 +26,10 @@ fn main() {
         std::process::exit(1);
     });
     hangar.spawn_background();
+    // herdr restore types into the user's terminals: only when asked for by name, never beside the app by accident.
+    if std::env::var_os("HANGAR_HC").is_some() {
+        hangar.spawn_herdr();
+    }
     // The cloud suites point it at a local relay and identity stand-in (see cloud/link.rs, oauth.rs).
     if cfg!(debug_assertions) && std::env::var_os("HANGAR_TEST_CLOUD").is_some() {
         if let Err(e) = hangar.start_cloud() {
