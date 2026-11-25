@@ -82,9 +82,20 @@ test("a session that started after the last scan is restored too", async () => {
   srv = await start();
   const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
   setTerms([{ address: "t1", pid: 4242, fg: 4242, labels: { [SESSION]: s.id, [PID]: "1" } }]);
+  // The background pass may get to it first; either way it is typed once.
   const r = await srv.api("POST", "/api/restore-herdr");
-  assert.deepEqual(r.json, { restored: [{ terminal: "t1", session: s.id }], failed: [] });
+  assert.deepEqual(r.json.failed, []);
+  await waitFor(() => sends().length);
   assert.deepEqual(sends().map((c) => c.args[2]), [lineFor(s)]);
+});
+
+test("the background pass and the global button racing type the line once", async () => {
+  const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
+  setTerms([{ address: "t1", pid: 4242, fg: 4242, labels: { [SESSION]: s.id, [PID]: "1" } }]);
+  srv = await start();
+  await Promise.all([1, 2, 3].map(() => srv.api("POST", "/api/restore-herdr")));
+  await waitFor(() => sends().length);
+  assert.equal(sends().length, 1);
 });
 
 test("a shell it can't type into is reported, not typed into", async () => {

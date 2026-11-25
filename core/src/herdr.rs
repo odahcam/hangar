@@ -8,7 +8,7 @@ use crate::proc;
 use crate::{ApiError, ApiResult, Hangar};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const SESSION: &str = "hangar.session";
@@ -69,28 +69,29 @@ fn json_of(bin: &str, args: &[&str]) -> Option<Value> {
     serde_json::from_str(&o.out).ok()
 }
 
+/// One live terminal, as hc sees it now.
+fn term(bin: &str, addr: &str) -> Option<Term> {
+    let g = json_of(bin, &["get", addr, "--json"]).filter(|g| g["state"] == "live")?;
+    let labels = g["labels"].as_object().map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
+    Some(Term {
+        addr: g["address"].as_str()?.to_string(),
+        pid: g["pid"].as_u64()? as u32,
+        fg_pid: g["foreground"]["pid"].as_u64().map(|p| p as u32),
+        fg_name: g["foreground"]["name"].as_str().unwrap_or("").to_string(),
+        labels,
+    })
+}
+
 /// This machine's live terminals. Another machine's (`machine/t7`) aren't restored here.
 fn terminals(bin: &str) -> Option<Vec<Term>> {
     let ls = json_of(bin, &["ls", "--json"])?;
-    let addrs: Vec<String> = ls["terminals"].as_array()?.iter().filter_map(|t| t["address"].as_str()).filter(|a| !a.contains('/')).map(String::from).collect();
-    Some(
-        addrs
-            .iter()
-            .filter_map(|a| json_of(bin, &["get", a, "--json"]))
-            .filter(|g| g["state"] == "live")
-            .filter_map(|g| {
-                let labels = g["labels"].as_object().map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
-                Some(Term {
-                    addr: g["address"].as_str()?.to_string(),
-                    pid: g["pid"].as_u64()? as u32,
-                    fg_pid: g["foreground"]["pid"].as_u64().map(|p| p as u32),
-                    fg_name: g["foreground"]["name"].as_str().unwrap_or("").to_string(),
-                    labels,
-                })
-            })
-            .collect(),
-    )
+    let addrs = ls["terminals"].as_array()?.iter().filter_map(|t| t["address"].as_str()).filter(|a| !a.contains('/'));
+    Some(addrs.filter_map(|a| term(bin, a)).collect())
 }
+
+/// One restore at a time: the background pass, Resume and the global button would otherwise each find the same
+/// terminal recovered and type into it twice.
+static RESTORING: Mutex<()> = Mutex::new(());
 
 /// The terminal pid each running claude descends from. The foreground process won't do: while a tool runs it is the
 /// tool, and the note would come and go with it.
@@ -169,7 +170,11 @@ impl Hangar {
 
     /// Types the noted session's resume line into the recovered terminal's shell. The note's pid becomes the terminal's
     /// either way: a resume that fails leaves a shell whose note the next tick drops instead of typing again.
-    fn restore_in(&self, bin: &str, t: &Term) -> Result<(), String> {
+    /// The terminal is looked at again under the lock: one no longer recovered was just restored by another caller.
+    fn restore_in(&self, bin: &str, seen: &Term) -> Result<(), String> {
+        let _one = RESTORING.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(t) = term(bin, &seen.addr).filter(Term::recovered) else { return Ok(()) };
+        let t = &t;
         let id = t.noted_session().unwrap_or_default().to_string();
         run(bin, &["label", &t.addr, &format!("{PID}={}", t.pid)], HC_WAIT);
         // A session that started after the last scan isn't in the catalog yet.
