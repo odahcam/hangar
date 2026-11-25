@@ -165,6 +165,8 @@ fn main() {
                 if let Err(e) = hangar.start_cloud() {
                     eprintln!("cloud: {e}");
                 }
+                // Only the one instance types into herdr's terminals.
+                hangar.spawn_herdr();
                 // Started by a pairing command when the app wasn't running.
                 hangar_core::cli::serve(&hangar, &std::env::args().collect::<Vec<_>>());
             }
