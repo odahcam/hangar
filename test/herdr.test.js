@@ -62,10 +62,10 @@ test("a recovered terminal running something else, or another machine's, is left
 
 test("Resume and the global restore type into the recovered terminal instead of opening a tab", async () => {
   const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
-  // Not at its prompt yet: the background pass leaves it, and the calls below find it recovered.
+  // Restoring waits to be asked for: the calls below find it recovered.
   setTerms([{ address: "t1", pid: 4242, fg: 5000, labels: { [SESSION]: s.id, [PID]: "1" } }]);
   srv = await start();
-  await waitFor(() => calls(w, "hc").some((c) => c.args[0] === "get"));
+  await srv.api("PATCH", "/api/herdr", { auto: false });
   setTerms([{ address: "t1", pid: 4242, fg: 4242, labels: { [SESSION]: s.id, [PID]: "1" } }]);
   assert.deepEqual((await srv.api("GET", "/api/herdr")).json.restorable, [{ terminal: "t1", session: s.id }]);
   assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { restored: "t1" });
@@ -103,6 +103,8 @@ test("a program opened in the shell while the line is made ready doesn't get it"
   const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
   setTerms([{ address: "t1", pid: 4242, fg: 5000, labels: { [SESSION]: s.id, [PID]: "1" } }]);
   srv = await start();
+  // The background pass would otherwise get to the terminal first and take the failure for itself.
+  await srv.api("PATCH", "/api/herdr", { auto: false });
   setTerms([{ address: "t1", pid: 4242, fg: 4242, busyOnLabel: 6000, labels: { [SESSION]: s.id, [PID]: "1" } }]);
   const r = await srv.api("POST", "/api/restore-herdr");
   assert.deepEqual(r.json.failed, [{ terminal: "t1", session: s.id, error: "the shell is no longer at its prompt" }]);
@@ -160,6 +162,7 @@ test("a shell it can't type into is reported, not typed into", async () => {
   const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
   setTerms([{ address: "t1", pid: 4242, fg: 5000, labels: { [SESSION]: s.id, [PID]: "1" } }]);
   srv = await start();
+  await srv.api("PATCH", "/api/herdr", { auto: false });
   setTerms([{ address: "t1", pid: 4242, fg: 4242, fgName: "fish", labels: { [SESSION]: s.id, [PID]: "1" } }]);
   const r = await srv.api("POST", "/api/restore-herdr");
   assert.deepEqual(r.json.failed, [{ terminal: "t1", session: s.id, error: "unsupported shell fish" }]);
