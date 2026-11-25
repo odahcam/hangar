@@ -98,6 +98,16 @@ test("the background pass and the global button racing type the line once", asyn
   assert.equal(sends().length, 1);
 });
 
+test("a program opened in the shell while the line is made ready doesn't get it", async () => {
+  const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
+  setTerms([{ address: "t1", pid: 4242, fg: 5000, labels: { [SESSION]: s.id, [PID]: "1" } }]);
+  srv = await start();
+  setTerms([{ address: "t1", pid: 4242, fg: 4242, busyOnLabel: 6000, labels: { [SESSION]: s.id, [PID]: "1" } }]);
+  const r = await srv.api("POST", "/api/restore-herdr");
+  assert.deepEqual(r.json.failed, [{ terminal: "t1", session: s.id, error: "the shell is no longer at its prompt" }]);
+  assert.equal(sends().length, 0);
+});
+
 test("a shell it can't type into is reported, not typed into", async () => {
   const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
   setTerms([{ address: "t1", pid: 4242, fg: 5000, labels: { [SESSION]: s.id, [PID]: "1" } }]);

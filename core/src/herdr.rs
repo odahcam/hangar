@@ -123,7 +123,18 @@ fn shell_line(shell: &str, cwd: &str, argv: &[String]) -> Option<String> {
             Some(format!("cd {} && {}", q(cwd), argv.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")))
         }
         "pwsh" | "powershell" => {
-            let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
+            // PowerShell takes the typographic single quotes (U+2018..U+201B) for ' too: each one is doubled the same way.
+            let q = |s: &str| {
+                let mut o = String::from("'");
+                for c in s.chars() {
+                    if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                        o.push(c);
+                    }
+                    o.push(c);
+                }
+                o.push('\'');
+                o
+            };
             Some(format!("Set-Location -LiteralPath {}; & {}", q(cwd), argv.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")))
         }
         _ => None,
@@ -188,6 +199,11 @@ impl Hangar {
         };
         let (cwd, argv) = line.map_err(|ApiError(_, e)| e)?;
         let line = shell_line(&t.fg_name, &cwd, &argv).ok_or_else(|| format!("unsupported shell {}", t.fg_name))?;
+        // The lookups above take a while: a program the person opened in that shell meanwhile (ssh, an editor, a
+        // password prompt) must not get the line.
+        if !term(bin, &t.addr).is_some_and(|n| n.pid == t.pid && n.fg_pid == Some(t.pid)) {
+            return Err("the shell is no longer at its prompt".into());
+        }
         let o = run(bin, &["send", &t.addr, &line], Duration::from_secs(90));
         if o.ok { Ok(()) } else { Err(o.err.trim().to_string()) }
     }
@@ -245,6 +261,8 @@ mod tests {
         assert_eq!(shell_line("zsh", "/w/it's", &argv).unwrap(), r"cd '/w/it'\''s' && '/A/hangar-resume' 'id' '--config' '/h/.claude-x'");
         assert_eq!(shell_line("-zsh", "/w", &argv[..2]).unwrap(), "cd '/w' && '/A/hangar-resume' 'id'");
         assert_eq!(shell_line(r"C:\x\pwsh.exe", r"C:\it's", &argv[..2]).unwrap(), r"Set-Location -LiteralPath 'C:\it''s'; & '/A/hangar-resume' 'id'");
+        assert_eq!(shell_line("pwsh", "C:\\a\u{2018}b\u{2019}c\u{201A}d\u{201B}e", &argv[..1]).unwrap(),
+            "Set-Location -LiteralPath 'C:\\a\u{2018}\u{2018}b\u{2019}\u{2019}c\u{201A}\u{201A}d\u{201B}\u{201B}e'; & '/A/hangar-resume'");
         assert!(shell_line("fish", "/w", &argv).is_none());
     }
 }

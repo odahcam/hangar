@@ -15,5 +15,7 @@ else if (cmd === "label") {
     const [k, v] = kv.split(/=(.*)/s);
     if (v) t.labels[k] = v; else delete t.labels[k];
   }
+  // busyOnLabel: the person opens a program in the shell (its pid here) while Hangar is still getting the line ready.
+  if (t.busyOnLabel) t.fg = t.busyOnLabel;
   fs.writeFileSync(process.env.FAKE_HC, JSON.stringify(terms));
 } else if (cmd !== "send") process.exit(2);
