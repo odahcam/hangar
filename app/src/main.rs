@@ -10,6 +10,12 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
+
+/// Passed by the login item: Hangar comes up without its window (on Windows, in the tray).
+const HIDDEN: &str = "--hidden";
 
 /// A hangar:// link: only the sign-in callback means anything, and the core accepts it only for the sign-in it is
 /// waiting for (state, issuer). On Windows the link arrives as the argument of a second instance, from anyone.
@@ -25,9 +31,8 @@ fn open_link(app: &AppHandle, url: &str) {
         if matches!(&r, Err(AuthError::Invalid(e)) if ["state", "iss", "query", "callback"].contains(&e.as_str())) {
             return;
         }
+        show_main(&app);
         if let Some(w) = app.get_webview_window("main") {
-            let _ = w.show();
-            let _ = w.set_focus();
             let err = r.err().map(|e| e.to_string()).unwrap_or_default();
             let _ = w.eval(format!("cloudLinked({})", serde_json::Value::String(err)));
         }
@@ -92,12 +97,42 @@ fn toggle_login_item(app: &AppHandle) {
     refresh_login_item(app);
 }
 
-#[cfg(target_os = "macos")]
+/// The window started hidden and hasn't been shown yet: its saved size and place (window-state) wait for its first
+/// showing, since restoring a maximized or full-screen window shows it.
+static STATE_PENDING: AtomicBool = AtomicBool::new(false);
+/// window-state's file as the hidden launch found it (None: there was none).
+static SAVED_STATE: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        if STATE_PENDING.swap(false, Ordering::SeqCst) {
+            let _ = w.restore_state(StateFlags::all() - StateFlags::VISIBLE);
+        }
         let _ = w.show();
         let _ = w.set_focus();
     }
+}
+
+/// Windows: the tray icon brings the window back (a click, or Open Hangar) and quits.
+#[cfg(windows)]
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let open = MenuItem::with_id(app, "tray-open", "Open Hangar", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "Quit", true, None::<&str>)?;
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Hangar")
+        .menu(&Menu::with_items(app, &[&open, &quit])?)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, e| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
 }
 
 fn main() {
@@ -112,6 +147,7 @@ fn main() {
     hangar.spawn_background();
     // Test instances run side by side on throwaway data: no single instance, no device identity in the real keychain.
     let test_instance = std::env::var_os("HANGAR_WEBVIEW_DATA").is_some();
+    let hidden = std::env::args().any(|a| a == HIDDEN);
 
     let mut app = tauri::Builder::default();
     if !test_instance {
@@ -124,23 +160,30 @@ fn main() {
             for a in argv.iter().skip(1) {
                 open_link(app, a);
             }
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
+            if !argv.iter().any(|a| a == HIDDEN) {
+                show_main(app);
             }
         }));
     }
     let mut app = app.plugin(tauri_plugin_deep_link::init()).plugin(tauri_plugin_opener::init());
     // Off-screen test instances must neither restore nor overwrite the real window position.
     if std::env::var_os("HANGAR_WINDOW_OFFSCREEN").is_none() {
-        app = app.plugin(tauri_plugin_window_state::Builder::default().build());
+        // Whether the window shows is the launch's to say (HIDDEN), not the last session's.
+        let mut state = tauri_plugin_window_state::Builder::default().with_state_flags(StateFlags::all() - StateFlags::VISIBLE);
+        if hidden {
+            state = state.skip_initial_state("main");
+            STATE_PENDING.store(true, Ordering::SeqCst);
+        }
+        app = app.plugin(state.build());
     }
     app
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![HIDDEN])))
         .manage(hangar)
         .invoke_handler(tauri::generate_handler![api])
         .on_menu_event(|app, event| match event.id().as_ref() {
             "login" => toggle_login_item(app),
+            "tray-open" => show_main(app),
+            "tray-quit" => app.exit(0),
             "reload" => {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.eval("location.reload()");
@@ -148,9 +191,8 @@ fn main() {
             }
             // Settings is a view of the page (web/index.html), the same one its header button opens.
             "settings" => {
+                show_main(app);
                 if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
                     let _ = w.eval("showView('settings')");
                 }
             }
@@ -158,6 +200,11 @@ fn main() {
         })
         .setup(move |app| {
             let handle = app.handle().clone();
+            if STATE_PENDING.load(Ordering::SeqCst) {
+                if let Ok(dir) = handle.path().app_config_dir() {
+                    let _ = SAVED_STATE.set(std::fs::read(dir.join(handle.filename())).ok());
+                }
+            }
             // Remote control starts once this is the only instance: a second launch quits in the plugin above, before
             // it could load the device identity or open a second link to the relay.
             if !test_instance {
@@ -189,6 +236,15 @@ fn main() {
             app.set_menu(menu)?;
             app.manage(LoginItem(login));
             refresh_login_item(&handle);
+            // A login item written before it passed HIDDEN is written again, with it.
+            let launcher = handle.autolaunch();
+            if !test_instance && launcher.is_enabled().unwrap_or(false) {
+                let _ = launcher.enable();
+            }
+            #[cfg(windows)]
+            if !test_instance {
+                build_tray(&handle)?;
+            }
 
             let opener = handle.clone();
             let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()));
@@ -218,6 +274,7 @@ fn main() {
             }
             let window = builder
                 .title("Hangar")
+                .visible(!hidden)
                 .inner_size(1100.0, 800.0)
                 .min_inner_size(480.0, 400.0)
                 // Links that leave the app open in the default browser. `tauri dev` serves the page from 127.0.0.1.
@@ -246,10 +303,20 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building Hangar")
-        .run(|_app, _event| {
-            #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = _event {
-                show_main(_app);
+        .run(|app, event| match event {
+            // Never shown: window-state just saved the hidden window's default size (its exit handler runs before
+            // this one) over the state it was waiting to restore; that state goes back.
+            tauri::RunEvent::Exit if STATE_PENDING.load(Ordering::SeqCst) => {
+                if let (Ok(dir), Some(saved)) = (app.path().app_config_dir(), SAVED_STATE.get()) {
+                    let file = dir.join(app.filename());
+                    let _ = match saved {
+                        Some(bytes) => std::fs::write(file, bytes),
+                        None => std::fs::remove_file(file),
+                    };
+                }
             }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_main(app),
+            _ => {}
         });
 }
