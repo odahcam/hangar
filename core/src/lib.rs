@@ -328,6 +328,7 @@ impl Hangar {
             ("GET", "insights") => return self.insights(),
             ("POST", "close-idle-tabs") => return Ok(self.close_idle_tabs()),
             ("GET", "herdr") => return Ok(self.herdr_status()),
+            ("PATCH", "herdr") => return self.set_herdr(&parse()?),
             ("POST", "restore-herdr") => return self.herdr_restore_all(),
             ("POST", "classify") => return Ok(self.run_now()),
             ("GET", "classifier") => return Ok(self.classifier_schedule()),

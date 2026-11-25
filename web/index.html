@@ -294,7 +294,13 @@ let cloud = null, remote = null, machine = "", machineNames = {};
 // herdr terminals that lost their Claude session to a restart (GET /api/herdr), this machine's only. Asked for apart
 // from the list: it asks hc about every terminal, and the list doesn't wait for that.
 let herdr = null;
-function loadHerdr() { api("GET", "/api/herdr").then((h) => { herdr = h; renderRestore(); }, () => {}); }
+function loadHerdr() {
+  return api("GET", "/api/herdr").then((h) => {
+    herdr = h;
+    renderRestore();
+    if (view === "settings" && !document.activeElement?.matches("#herdrPath")) render();
+  }, () => {});
+}
 function renderRestore() {
   const b = $("#restoreHerdr"), lost = machine ? 0 : herdr?.restorable?.length || 0;
   b.hidden = !lost || view === "insights" || view === "settings";
@@ -475,7 +481,7 @@ function render() {
   if (ins) return loadInsights();
   // Settings are this machine's: with another one shown, its accounts aren't listed here as if they could be edited.
   const local = machine ? [panel(t("pAccounts"), "", [el("div", { class: "meta", text: t("settingsLocalOnly", { name: machineName(machine) }) }),
-    el("div", {}, [btn(t("showThisMachine"), "", showThisMachine)])])] : [accountsPanel(), classifierSettings()];
+    el("div", {}, [btn(t("showThisMachine"), "", showThisMachine)])])] : [accountsPanel(), classifierSettings(), herdrSettings()];
   if (set) return $("#settings").replaceChildren(...[el("div", {}, [btn(t("back"), "", settingsBack)]), ...local, cloudPanel(), remotePanel()].filter(Boolean));
   const qs = $("#q").value.toLowerCase(), p = $("#proj").value, liveOnly = $("#liveOnly").checked, suggestedOnly = $("#suggestedOnly").checked;
   const acct = multi() ? $("#acct").value : "";
@@ -1002,6 +1008,31 @@ function classifierSettings() {
   return panel(t("pClassifier"), t("pClassifierSettingsSub"), [
     el("label", { class: "transfer" }, [t("classifierAccount") + " ", sel]),
     classifier.error ? el("div", { class: "warn", text: failed(new Error(classifier.error)) }) : null,
+  ]);
+}
+
+// herdr: the integration on or off, restoring on its own or only when asked, and the hc to call.
+function herdrSettings() {
+  if (!herdr) return null;
+  const save = (patch, control) => act(() => api("PATCH", "/api/herdr", patch).then(loadHerdr), null, control);
+  const on = el("input", { type: "checkbox", id: "herdrOn" });
+  on.checked = herdr.enabled;
+  on.onchange = () => save({ enabled: on.checked }, on);
+  const auto = el("select", { id: "herdrAuto", "aria-label": t("herdrAfter") }, [el("option", { value: "1", text: t("herdrAuto") }), el("option", { value: "0", text: t("herdrManual") })]);
+  auto.value = herdr.auto ? "1" : "0";
+  auto.disabled = !herdr.enabled;
+  auto.onchange = () => save({ auto: auto.value === "1" }, auto);
+  const path = el("input", { type: "text", id: "herdrPath", placeholder: t("herdrPathAuto"), "aria-label": t("herdrPath") });
+  path.value = herdr.hcPath;
+  path.onchange = () => save({ hcPath: path.value }, path);
+  const hook = el("input", { type: "checkbox", disabled: "" });
+  return panel(t("pHerdr"), t("pHerdrSub"), [
+    el("label", { class: "btn" }, [on, " " + t("herdrOn")]),
+    el("label", { class: "transfer" }, [t("herdrAfter") + " ", auto]),
+    el("label", { class: "transfer" }, [t("herdrPath") + " ", path]),
+    herdr.enabled ? el("div", { id: "herdrHc", class: herdr.available ? "meta" : "meta warn",
+      text: t(herdr.available ? "herdrFound" : "herdrMissing", { path: herdr.hc || "hc" }) }) : null,
+    el("label", { class: "btn", "aria-disabled": "true" }, [hook, " " + t("herdrHook") + " (" + t("soon") + ")"]),
   ]);
 }
 

@@ -4,10 +4,13 @@
 // a new pid; one whose claude just exited keeps its pid, and its note is dropped. A recovered terminal whose shell sits
 // at its prompt gets the session's resume line typed into it, in the same pane: on every tick (so after a reboot, once
 // Hangar is up), from the global button and `Hangar --restore`, and from the session's own Resume.
-use crate::proc;
+// Settings (in meta): the integration on or off (off drops the notes and leaves Resume opening a tab), restoring on
+// the tick or only when asked, and the hc to call.
+use crate::{db, proc};
 use crate::{ApiError, ApiResult, Hangar};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,6 +18,12 @@ const SESSION: &str = "hangar.session";
 const PID: &str = "hangar.pid";
 const TICK: Duration = Duration::from_secs(15);
 const HC_WAIT: Duration = Duration::from_secs(10);
+const ON: &str = "herdr_on";
+const AUTO: &str = "herdr_auto";
+const HC_PATH: &str = "herdr_hc";
+
+/// The notes were dropped since the integration went off; the tick drops them once, then leaves hc alone.
+static FORGOTTEN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) struct Term {
     pub addr: String,
@@ -38,11 +47,14 @@ impl Term {
     }
 }
 
-/// hc to call: HANGAR_HC (empty: off), else where hc installs itself (a GUI app's PATH doesn't reach ~/.local/bin), else
-/// the PATH. A test world (no discovery) leaves the user's hc alone unless HANGAR_HC names one.
-fn hc(discover: bool) -> Option<String> {
+/// hc to call: HANGAR_HC (empty: off), else the path set in Settings, else where hc installs itself (a GUI app's PATH
+/// doesn't reach ~/.local/bin), else the PATH. A test world (no discovery) leaves the user's hc alone unless one is named.
+fn hc(discover: bool, custom: Option<String>) -> Option<String> {
     if let Some(v) = std::env::var_os("HANGAR_HC") {
         return Some(v.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+    }
+    if let Some(p) = custom.filter(|p| !p.is_empty()) {
+        return Some(p);
     }
     if !discover {
         return None;
@@ -142,14 +154,46 @@ fn shell_line(shell: &str, cwd: &str, argv: &[String]) -> Option<String> {
 }
 
 impl Hangar {
+    fn herdr_meta(&self, k: &str) -> Option<String> {
+        db::get_meta(&self.db(), k).ok().flatten()
+    }
+    fn herdr_on(&self) -> bool {
+        self.herdr_meta(ON).as_deref() != Some("0")
+    }
+    fn herdr_auto(&self) -> bool {
+        self.herdr_meta(AUTO).as_deref() != Some("0")
+    }
+    /// hc whether or not the integration is on.
+    fn hc_bin(&self) -> Option<String> {
+        hc(self.discover, self.herdr_meta(HC_PATH))
+    }
+    /// hc, with the integration on.
     fn hc(&self) -> Option<String> {
-        hc(self.discover)
+        self.herdr_on().then(|| self.hc_bin()).flatten()
     }
 
-    /// Notes which session runs in which terminal, drops the notes of claudes that exited, restores recovered terminals.
+    /// Drops Hangar's notes from this machine's terminals.
+    fn herdr_forget(&self) {
+        let Some(terms) = self.hc_bin().and_then(|b| terminals(&b).map(|t| (b, t))) else { return };
+        let (bin, terms) = terms;
+        for t in terms.iter().filter(|t| t.labels.contains_key(SESSION) || t.labels.contains_key(PID)) {
+            run(&bin, &["label", &t.addr, &format!("{SESSION}="), &format!("{PID}=")], HC_WAIT);
+        }
+    }
+
+    /// Notes which session runs in which terminal, drops the notes of claudes that exited, restores recovered terminals
+    /// (unless restoring waits to be asked for).
     pub(crate) fn herdr_tick(&self) {
+        if !self.herdr_on() {
+            if !FORGOTTEN.swap(true, Ordering::SeqCst) {
+                self.herdr_forget();
+            }
+            return;
+        }
+        FORGOTTEN.store(false, Ordering::SeqCst);
         let Some(bin) = self.hc() else { return };
         let Some(terms) = terminals(&bin) else { return };
+        let auto = self.herdr_auto();
         let live: Vec<(String, u32)> = self.live_sessions().into_iter().map(|(id, l)| (id, l.pid)).collect();
         let running = claude_terminals(&live, &terms.iter().map(|t| t.pid).collect::<Vec<_>>());
         for t in &terms {
@@ -159,6 +203,9 @@ impl Hangar {
                     run(&bin, &["label", &t.addr, &format!("{SESSION}={id}"), &format!("{PID}={pid}")], HC_WAIT);
                 }
             } else if t.recovered() {
+                if !auto {
+                    continue;
+                }
                 if let Err(e) = self.restore_in(&bin, t) {
                     eprintln!("herdr: {}: {e}", t.addr);
                 }
@@ -166,12 +213,14 @@ impl Hangar {
                 run(&bin, &["label", &t.addr, &format!("{SESSION}="), &format!("{PID}=")], HC_WAIT);
             }
         }
+        // Turned off during this pass, which may have written a note after they were dropped: the next tick drops them.
+        if !self.herdr_on() {
+            FORGOTTEN.store(false, Ordering::SeqCst);
+        }
     }
 
+    /// The tick runs whatever the settings say now: each pass reads them, so a change applies without a restart.
     pub fn spawn_herdr(self: &Arc<Self>) {
-        if self.hc().is_none() {
-            return;
-        }
         let h = Arc::clone(self);
         std::thread::spawn(move || loop {
             h.herdr_tick();
@@ -215,15 +264,50 @@ impl Hangar {
         Some(self.restore_in(&bin, &t).map(|_| json!({ "restored": t.addr })).map_err(|e| ApiError(500, e)))
     }
 
-    /// GET /api/herdr: whether hc is there and the sessions waiting in recovered terminals.
+    /// GET /api/herdr: the settings, the hc they lead to, whether it answers (asked only with the integration on) and the
+    /// sessions waiting in recovered terminals.
     pub(crate) fn herdr_status(&self) -> Value {
-        let terms = self.hc().and_then(|b| terminals(&b));
+        let (on, bin) = (self.herdr_on(), self.hc_bin());
+        let terms = bin.as_deref().filter(|_| on).and_then(terminals);
         let restorable: Vec<Value> = terms.iter().flatten().filter(|t| t.recovered()).map(|t| json!({ "terminal": t.addr, "session": t.noted_session() })).collect();
-        json!({ "available": terms.is_some(), "restorable": restorable })
+        json!({ "enabled": on, "auto": self.herdr_auto(), "hcPath": self.herdr_meta(HC_PATH).unwrap_or_default(), "hc": bin,
+            "available": terms.is_some(), "restorable": restorable })
+    }
+
+    /// PATCH /api/herdr: { enabled?, auto?, hcPath? } ("" goes back to finding hc).
+    pub(crate) fn set_herdr(&self, body: &Value) -> ApiResult {
+        let flag = |k: &str| match &body[k] {
+            Value::Null => Ok(None),
+            Value::Bool(b) => Ok(Some(if *b { "1" } else { "0" })),
+            _ => Err(ApiError(400, k.into())),
+        };
+        let (on, auto) = (flag("enabled")?, flag("auto")?);
+        let path = match &body["hcPath"] {
+            Value::Null => None,
+            Value::String(s) => Some(s.trim().to_string()),
+            _ => return Err(ApiError(400, "hcPath".into())),
+        };
+        {
+            let db = self.db();
+            for (k, v) in [(ON, on.map(str::to_string)), (AUTO, auto.map(str::to_string)), (HC_PATH, path)] {
+                if let Some(v) = v {
+                    db::set_meta(&db, k, &v)?;
+                }
+            }
+        }
+        // Off drops the notes now, not on the next tick (the lock above is released first: hc_bin reads meta).
+        if on == Some("0") {
+            FORGOTTEN.store(true, Ordering::SeqCst);
+            self.herdr_forget();
+        }
+        Ok(json!({ "ok": true }))
     }
 
     /// POST /api/restore-herdr: every recovered terminal, now.
     pub(crate) fn herdr_restore_all(&self) -> ApiResult {
+        if !self.herdr_on() {
+            return Err(ApiError(409, "herdr_off".into()));
+        }
         let bin = self.hc().ok_or_else(|| ApiError(409, "no_hc".into()))?;
         let terms = terminals(&bin).ok_or_else(|| ApiError(409, "no_hc".into()))?;
         let (mut restored, mut failed) = (vec![], vec![]);

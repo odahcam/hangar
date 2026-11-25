@@ -49,6 +49,27 @@ test("a restore that fails says why and keeps the button", async ({ page }) => {
   await expect(b).toBeEnabled();
 });
 
+test("Settings turn herdr off, make restoring wait to be asked and set the hc path", async ({ page }) => {
+  const st = { enabled: true, auto: true, hcPath: "", hc: "/u/.local/bin/hc", available: true, restorable: [] }, patches = [];
+  await srv.intercept(page, ({ method, path, body }) => {
+    if (path !== "/api/herdr") return null;
+    if (method === "PATCH") { patches.push(body); Object.assign(st, body, body.hcPath != null ? { hc: body.hcPath || "/u/.local/bin/hc" } : {}); return { json: { ok: true } }; }
+    return { json: st };
+  });
+  page = await srv.open(page);
+  await page.locator("#settingsBtn").click();
+  await expect(page.locator("#herdrHc")).toHaveText("hc answers at /u/.local/bin/hc");
+  await page.locator("#herdrAuto").selectOption("0");
+  await expect.poll(() => patches).toEqual([{ auto: false }]);
+  await page.locator("#herdrPath").fill("/opt/hc");
+  await page.locator("#herdrPath").press("Enter");
+  await expect(page.locator("#herdrHc")).toHaveText("hc answers at /opt/hc");
+  await page.locator("#herdrOn").uncheck();
+  await expect.poll(() => patches.at(-1)).toEqual({ enabled: false });
+  await expect(page.locator("#herdrAuto")).toBeDisabled();
+  await expect(page.locator("#herdrHc")).toBeHidden();
+});
+
 test("without hc the button stays away", async ({ page }) => {
   page = await srv.open(page);
   await expect(page.locator("#list li .title")).toHaveText(["Rate limiter"]);

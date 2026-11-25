@@ -55,7 +55,8 @@ test("a recovered terminal running something else, or another machine's, is left
     { address: "mac/t2", pid: 4343, fg: 4343, labels: { [SESSION]: s.id, [PID]: "1" } },
   ]);
   srv = await start();
-  assert.deepEqual((await srv.api("GET", "/api/herdr")).json, { available: true, restorable: [] });
+  const st = (await srv.api("GET", "/api/herdr")).json;
+  assert.deepEqual([st.available, st.restorable], [true, []]);
   assert.equal(sends().length, 0);
 });
 
@@ -106,6 +107,53 @@ test("a program opened in the shell while the line is made ready doesn't get it"
   const r = await srv.api("POST", "/api/restore-herdr");
   assert.deepEqual(r.json.failed, [{ terminal: "t1", session: s.id, error: "the shell is no longer at its prompt" }]);
   assert.equal(sends().length, 0);
+});
+
+test("restoring only when asked: the background pass leaves a recovered terminal to the button", async () => {
+  const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
+  setTerms([]);
+  srv = await start();
+  assert.deepEqual((await srv.api("PATCH", "/api/herdr", { auto: false })).json, { ok: true });
+  setTerms([{ address: "t1", pid: 4242, fg: 4242, labels: { [SESSION]: s.id, [PID]: "1" } }]);
+  const gets = () => calls(w, "hc").filter((c) => c.args[0] === "get").length;
+  const before = gets();
+  await waitFor(() => gets() > before, { timeout: 20000 });
+  assert.equal(sends().length, 0);
+  assert.equal(terms()[0].labels[PID], "1", "the note stays for the button");
+  const st = (await srv.api("GET", "/api/herdr")).json;
+  assert.equal(st.auto, false);
+  assert.deepEqual(st.restorable, [{ terminal: "t1", session: s.id }]);
+  assert.deepEqual((await srv.api("POST", "/api/restore-herdr")).json.restored, [{ terminal: "t1", session: s.id }]);
+  assert.deepEqual(sends().map((c) => c.args[2]), [lineFor(s)]);
+});
+
+test("with the integration off, the notes go, nothing is typed and Resume opens a tab", async () => {
+  const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
+  setTerms([{ address: "t1", pid: 4242, fg: 5000, labels: { [SESSION]: s.id, [PID]: "1" } }]);
+  srv = await start();
+  await srv.api("PATCH", "/api/herdr", { enabled: false });
+  assert.deepEqual(terms()[0].labels, {});
+  setTerms([{ address: "t1", pid: 4242, fg: 4242, labels: { [SESSION]: s.id, [PID]: "1" } }]);
+  const st = (await srv.api("GET", "/api/herdr")).json;
+  assert.deepEqual([st.enabled, st.available, st.restorable], [false, false, []]);
+  assert.equal((await srv.api("POST", "/api/restore-herdr")).status, 409);
+  assert.notDeepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { restored: "t1" });
+  assert.equal(sends().length, 0);
+  assert.ok(calls(w).some((c) => c.bin === "osascript" || c.bin === "wt"), "a terminal tab opened");
+});
+
+test("the hc path set in Settings is the hc called", async () => {
+  const s = addSession(w, { cwd: "/w/acme/api", turns: [{ user: "a" }] });
+  setTerms([{ address: "t1", pid: 4242, fg: 4242, labels: { [SESSION]: s.id, [PID]: "1" } }]);
+  // No HANGAR_HC, and a test world doesn't look for the user's hc: none until the path is set.
+  srv = await startServer(w, { FAKE_HC: hcFile });
+  assert.equal((await srv.api("GET", "/api/herdr")).json.available, false);
+  const bin = path.join(BIN, "hc.js");
+  await srv.api("PATCH", "/api/herdr", { hcPath: ` ${bin} ` });
+  const st = (await srv.api("GET", "/api/herdr")).json;
+  assert.deepEqual([st.hcPath, st.hc, st.available, st.restorable], [bin, bin, true, [{ terminal: "t1", session: s.id }]]);
+  assert.deepEqual((await srv.api("POST", "/api/restore-herdr")).json.restored, [{ terminal: "t1", session: s.id }]);
+  assert.equal((await srv.api("PATCH", "/api/herdr", { enabled: "no" })).status, 400);
 });
 
 test("a shell it can't type into is reported, not typed into", async () => {
