@@ -63,10 +63,11 @@ test("started without --hidden, the window shows", async () => {
   expect((await app.window()).visible).toBe(true);
 });
 
-// The login item: a value named after the app in a Run key, as the autostart plugin writes it: HKLM's when the app
-// runs elevated (as on CI), else HKCU's; turning it on or off also writes StartupApproved\Run (Task Manager's switch).
-// The installed Hangar's login item has the same name, so these keys are exported before each spec, the app's values
-// dropped (a spec starts with no login item), and put back from the export afterwards, types and all.
+// The login item: a value named after the app in HKCU's Run key, even with the app elevated (as on CI), never in
+// HKLM's (which starts it for every user); both are looked at. Turning it on or off also writes StartupApproved\Run
+// (Task Manager's switch). The installed Hangar's login item has the same name, so these keys are exported before each
+// spec, the app's values dropped (a spec starts with no login item), and put back from the export afterwards, types
+// and all.
 const NAME = "Hangar";
 const WIN = "Software\\Microsoft\\Windows\\CurrentVersion\\";
 const KEYS = ["HKCU", "HKLM"].flatMap((root) => [`${root}\\${WIN}Run`, `${root}\\${WIN}Explorer\\StartupApproved\\Run`]);
@@ -78,12 +79,14 @@ function runValues() {
     return out.split(/\r?\n/).map((l) => l.match(/^\s+(.+?)\s{4}REG_\w+\s{4}(.*)$/)).filter(Boolean).map(([, name, data]) => ({ key, name, data }));
   });
 }
-const ours = () => runValues().find((v) => v.data.toLowerCase().includes(APP.toLowerCase()));
+// Every Run value naming the test build, and the first.
+const mine = () => runValues().filter((v) => v.data.toLowerCase().includes(APP.toLowerCase()));
+const ours = () => mine()[0];
 const setRun = ({ key, name, data }) => execFileSync("reg", ["add", key, "/v", name, "/t", "REG_SZ", "/d", data, "/f"]);
 const reg = (...args) => { try { execFileSync("reg", args, { stdio: "ignore" }); return true; } catch { return false; } };
 const dropApp = () => KEYS.forEach((k) => reg("delete", k, "/v", NAME, "/f"));
 
-test.describe("the login item", () => {
+test.describe("the login item, the person's own", () => {
   // One Run key for all of them.
   test.describe.configure({ mode: "serial" });
   let exports;
@@ -104,8 +107,19 @@ test.describe("the login item", () => {
       throw new Error(`no Run value names ${APP}: ${JSON.stringify(runValues())}\n${fs.readFileSync(path.join(w.root, "app.log"), "utf8").slice(-1000)}`);
     });
     expect(ours().data).toMatch(/--hidden/);
+    // Quoted: a path with spaces, unquoted, runs a prefix of it.
+    expect(ours().data.startsWith(`"${APP}"`)).toBe(true);
+    expect(mine().map((v) => v.key.split("\\")[0])).toEqual(["HKCU"]);
     await app.menu("login");
     await waitFor(() => !ours());
+  });
+
+  test("a login item in HKLM's Run key moves to HKCU's", async () => {
+    const hklm = RUNS.find((k) => k.startsWith("HKLM"));
+    test.skip(!reg("add", hklm, "/v", NAME, "/t", "REG_SZ", "/d", `"${APP}" --hidden`, "/f"), "writing HKLM needs an administrator (CI runs as one)");
+    app = await start([], { HANGAR_E2E_LOGIN: "1" });
+    await waitFor(() => mine().length === 1 && mine()[0].key.startsWith("HKCU"));
+    expect(mine()[0].data).toMatch(/--hidden/);
   });
 
   test("a login item from before --hidden is written again with it", async () => {
