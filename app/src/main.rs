@@ -88,7 +88,13 @@ fn refresh_login_item(app: &AppHandle) {
     let _ = app.state::<LoginItem>().0.set_checked(enabled);
 }
 
+/// A test instance leaves the login item alone (it would point it at the test build), unless a spec is about it.
+static LOGIN_ITEM: AtomicBool = AtomicBool::new(true);
+
 fn toggle_login_item(app: &AppHandle) {
+    if !LOGIN_ITEM.load(Ordering::SeqCst) {
+        return;
+    }
     let launcher = app.autolaunch();
     let result = if launcher.is_enabled().unwrap_or(false) { launcher.disable() } else { launcher.enable() };
     if let Err(e) = result {
@@ -111,6 +117,35 @@ fn show_main(app: &AppHandle) {
         let _ = w.show();
         let _ = w.set_focus();
     }
+}
+
+/// The app menu's and the tray's items.
+fn on_menu(app: &AppHandle, id: &str) {
+    match id {
+        "login" => toggle_login_item(app),
+        "tray-open" => show_main(app),
+        "tray-quit" => app.exit(0),
+        "reload" => {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.eval("location.reload()");
+            }
+        }
+        // Settings is a view of the page (web/index.html), the same one its header button opens.
+        "settings" => {
+            show_main(app);
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.eval("showView('settings')");
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Debug builds: the desktop e2e specs pick a menu or tray item, which the DevTools protocol can't reach.
+#[cfg(debug_assertions)]
+#[tauri::command]
+fn e2e_menu(app: AppHandle, id: String) {
+    on_menu(&app, &id);
 }
 
 /// Windows: the tray icon brings the window back (a click, or Open Hangar) and quits.
@@ -148,6 +183,12 @@ fn main() {
     // Test instances run side by side on throwaway data: no single instance, no device identity in the real keychain.
     let test_instance = std::env::var_os("HANGAR_WEBVIEW_DATA").is_some();
     let hidden = std::env::args().any(|a| a == HIDDEN);
+    let login_item = !test_instance || std::env::var_os("HANGAR_E2E_LOGIN").is_some();
+    LOGIN_ITEM.store(login_item, Ordering::SeqCst);
+    #[cfg(debug_assertions)]
+    let handlers: fn(tauri::ipc::Invoke<Wry>) -> bool = tauri::generate_handler![api, e2e_menu];
+    #[cfg(not(debug_assertions))]
+    let handlers: fn(tauri::ipc::Invoke<Wry>) -> bool = tauri::generate_handler![api];
 
     let mut app = tauri::Builder::default();
     if !test_instance {
@@ -166,10 +207,15 @@ fn main() {
         }));
     }
     let mut app = app.plugin(tauri_plugin_deep_link::init()).plugin(tauri_plugin_opener::init());
-    // Off-screen test instances must neither restore nor overwrite the real window position.
-    if std::env::var_os("HANGAR_WINDOW_OFFSCREEN").is_none() {
+    // Off-screen test instances must neither restore nor overwrite the real window position, unless given a file of
+    // their own (HANGAR_WINDOW_STATE, absolute: it replaces the config dir's).
+    let state_file = std::env::var("HANGAR_WINDOW_STATE").ok();
+    if std::env::var_os("HANGAR_WINDOW_OFFSCREEN").is_none() || state_file.is_some() {
         // Whether the window shows is the launch's to say (HIDDEN), not the last session's.
         let mut state = tauri_plugin_window_state::Builder::default().with_state_flags(StateFlags::all() - StateFlags::VISIBLE);
+        if let Some(f) = state_file {
+            state = state.with_filename(f);
+        }
         if hidden {
             state = state.skip_initial_state("main");
             STATE_PENDING.store(true, Ordering::SeqCst);
@@ -179,25 +225,8 @@ fn main() {
     app
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![HIDDEN])))
         .manage(hangar)
-        .invoke_handler(tauri::generate_handler![api])
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "login" => toggle_login_item(app),
-            "tray-open" => show_main(app),
-            "tray-quit" => app.exit(0),
-            "reload" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.eval("location.reload()");
-                }
-            }
-            // Settings is a view of the page (web/index.html), the same one its header button opens.
-            "settings" => {
-                show_main(app);
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.eval("showView('settings')");
-                }
-            }
-            _ => {}
-        })
+        .invoke_handler(handlers)
+        .on_menu_event(|app, event| on_menu(app, event.id().as_ref()))
         .setup(move |app| {
             let handle = app.handle().clone();
             if STATE_PENDING.load(Ordering::SeqCst) {
@@ -238,7 +267,7 @@ fn main() {
             refresh_login_item(&handle);
             // A login item written before it passed HIDDEN is written again, with it.
             let launcher = handle.autolaunch();
-            if !test_instance && launcher.is_enabled().unwrap_or(false) {
+            if login_item && launcher.is_enabled().unwrap_or(false) {
                 let _ = launcher.enable();
             }
             #[cfg(windows)]
