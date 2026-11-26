@@ -127,18 +127,22 @@ fn exists(p: &str) -> bool {
     !p.is_empty() && Path::new(p).exists()
 }
 
-/// zsh and bash, and a login shell that is neither (fish, tcsh): that one only as Terminal's own (see `openers`).
+/// zsh and bash (the login shell's own copy when it is one of them, Homebrew's say), another POSIX login shell (sh,
+/// ksh, dash), and a login shell that isn't POSIX (fish, tcsh): that one only as Terminal's own (see `openers`).
 #[cfg(target_os = "macos")]
 fn shells() -> Vec<Shell> {
-    let mut out: Vec<Shell> = [("zsh", "/bin/zsh"), ("bash", "/bin/bash")]
-        .into_iter()
-        .filter(|(_, p)| exists(p))
-        .map(|(id, path)| Shell { id: id.into(), name: id.into(), path: path.into(), kind: Kind::Posix })
-        .collect();
     let login = crate::platform::macos::login_shell();
     let name = Path::new(&login).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-    if !name.is_empty() && !matches!(name.as_str(), "zsh" | "bash") {
-        out.push(Shell { id: name.clone(), name, path: login, kind: Kind::Login });
+    let mut out: Vec<Shell> = [("zsh", "/bin/zsh"), ("bash", "/bin/bash")]
+        .into_iter()
+        .map(|(id, path)| (id, if name == id { login.clone() } else { path.to_string() }))
+        .filter(|(id, p)| exists(p) || name == *id)
+        .map(|(id, path)| Shell { id: id.into(), name: id.into(), path, kind: Kind::Posix })
+        .collect();
+    match name.as_str() {
+        "" | "zsh" | "bash" => {}
+        "sh" | "ksh" | "dash" => out.push(Shell { id: name.clone(), name, path: login, kind: Kind::Posix }),
+        _ => out.push(Shell { id: name.clone(), name, path: login, kind: Kind::Login }),
     }
     out
 }
@@ -280,6 +284,7 @@ impl Hangar {
         let preferred = self.preferred_opener();
         let default = Some(preferred.clone()).filter(|p| openers.iter().any(|(id, ..)| id == p)).or(system.clone());
         let mut paths: Vec<String> = openers.iter().flat_map(|(_, s, a)| [s.path.clone(), a.icon.clone()]).filter(|p| !p.is_empty()).collect();
+        paths.sort();
         paths.dedup();
         let icons = if self.discover { icons(&paths) } else { HashMap::new() };
         let (mut shells, mut apps) = (Map::new(), Map::new());
@@ -322,6 +327,34 @@ impl Hangar {
         };
         let line = shell_argv(shell, cwd, argv).map_err(|e| ApiError(409, e))?;
         self.launch(shell, app, cwd, argv, &line).map_err(|e| ApiError(500, e))
+    }
+
+    /// macOS: a running session that isn't in a Terminal tab is in another terminal app (its process's ancestors say
+    /// which). iTerm2 brings its session forward; Ghostty and WezTerm, which can't be asked for a tab, come forward
+    /// themselves. Opening it again would fork the session, so where it can't be shown it says so. None: in none of
+    /// them (Terminal's own flow goes on).
+    #[cfg(target_os = "macos")]
+    pub(crate) fn focus_in_app(&self, pid: u32, tty: Option<&str>) -> Option<ApiResult> {
+        use crate::platform::macos as mac;
+        let shown = |ok: bool| Some(if ok { Ok(json!({ "focused": tty.unwrap_or_default() })) } else { Err(ApiError(409, "already_open".into())) });
+        // A test world's sessions run under the test runner, whose own terminal isn't theirs; a test asks by name.
+        if !self.discover && std::env::var_os("HANGAR_HOST_APPS").is_none() {
+            return None;
+        }
+        match mac::host_app(pid)? {
+            "terminal" => None,
+            "iterm" => shown(tty.is_some_and(mac::iterm_focus)),
+            app @ ("ghostty" | "wezterm") => {
+                let bundle = find_app(if app == "ghostty" { "Ghostty.app" } else { "WezTerm.app" });
+                shown(bundle.is_some_and(|b| mac::activate(&b)))
+            }
+            _ => shown(false),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn focus_in_app(&self, _: u32, _: Option<&str>) -> Option<ApiResult> {
+        None
     }
 
     #[cfg(target_os = "macos")]

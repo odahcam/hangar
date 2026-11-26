@@ -4,6 +4,7 @@ const { test, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
 const { BIN, RESUME, DARWIN, WIN32, makeWorld, addSession, addLive, setTabs, calls, startServer, cleanup, waitFor } = require("./helpers");
 
 let w, srv;
@@ -90,6 +91,83 @@ test("under a login shell that isn't POSIX, Terminal and iTerm2 offer only it; t
   assert.equal(o.system, "fish:terminal");
 });
 
+test("on macOS a zsh or bash login shell outside /bin (Homebrew's) is the one Terminal types into, as before", { skip: !DARWIN }, async () => {
+  const s = addSession(w, { cwd: "/work/api", turns: [{ user: "a" }] });
+  srv = await startServer(w, { HANGAR_LOGIN_SHELL: "/opt/homebrew/bin/zsh" });
+  const o = (await srv.api("GET", "/api/openers")).json;
+  assert.deepEqual([o.system, o.openers[0].id], ["zsh:terminal", "zsh:terminal"]);
+  assert.deepEqual((await resume(s)).json, { opened: true });
+  const [c] = calls(w, "osascript").filter((c) => c.script.includes("do script"));
+  assert.ok(c.script.includes(`cd '/work/api' && '${RESUME}'`) && !c.script.includes("exec "), c.script);
+  assert.deepEqual((await resume(s, "zsh:ghostty")).status, 400, "Ghostty isn't installed in this world");
+});
+
+test("on macOS another POSIX login shell (ksh) joins zsh and bash everywhere", { skip: !DARWIN }, async () => {
+  bundle("Ghostty.app");
+  srv = await startServer(w, { HANGAR_LOGIN_SHELL: "/bin/ksh" });
+  const o = (await srv.api("GET", "/api/openers")).json;
+  assert.deepEqual(o.openers.map((x) => x.id), ["zsh:terminal", "bash:terminal", "ksh:terminal", "zsh:ghostty", "bash:ghostty", "ksh:ghostty"]);
+  assert.equal(o.system, "ksh:terminal");
+});
+
+test("on macOS Terminal or iTerm2 refusing to be driven is said, not reported as opened", { skip: !DARWIN }, async () => {
+  bundle("iTerm.app");
+  const s = addSession(w, { cwd: "/work/api", turns: [{ user: "a" }] });
+  srv = await startServer(w, { FAKE_OSASCRIPT_FAIL: "iTerm" });
+  const r = await resume(s, "zsh:iterm");
+  assert.equal(r.status, 500);
+  assert.match(r.json.error, /Not authorized/);
+});
+
+// A running session under another terminal app's process: a stand-in for the app (node, run from a path inside its
+// bundle, which is what ps names) starts the claude stand-in.
+async function liveUnder(s, bundleName, exe) {
+  const dir = path.join(bundle(bundleName), "Contents", "MacOS");
+  const bin = path.join(dir, exe);
+  fs.symlinkSync(process.execPath, bin);
+  const code = "const c = require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600e3)'], { stdio: 'ignore' });"
+    + "console.log(c.pid); process.on('SIGTERM', () => { c.kill(); process.exit(); }); setInterval(() => {}, 1e3);";
+  const app = spawn(bin, ["-e", code], { stdio: ["ignore", "pipe", "ignore"] });
+  w.children.push(app);
+  const pid = await new Promise((r) => app.stdout.once("data", (d) => r(Number(String(d).trim()))));
+  w.children.push({ pid, kill() { try { process.kill(pid); } catch {} } });
+  fs.writeFileSync(path.join(w.claude, "sessions", pid + ".json"), JSON.stringify({ pid, sessionId: s.id, cwd: s.cwd }));
+}
+const iterm = () => path.join(w.root, "iterm.tsv");
+const hosted = () => startServer(w, { HANGAR_HOST_APPS: "1", FAKE_ITERM: iterm() });
+
+test("on macOS a running session in iTerm2 that iTerm2 doesn't show is said to be open, never opened again", { skip: !DARWIN }, async () => {
+  const s = addSession(w, { cwd: "/work/api", turns: [{ user: "a" }] });
+  await liveUnder(s, "iTerm.app", "iTerm2");
+  srv = await hosted();
+  setTabs(w, []);
+  assert.deepEqual((await resume(s)).json, { error: "already_open" });
+  assert.ok(!calls(w, "osascript").some((c) => c.script.includes("do script") || c.script.includes("create window")), "no second copy");
+});
+
+test("on macOS a running session in iTerm2 is brought forward there", { skip: !DARWIN }, async (t) => {
+  const s = addSession(w, { cwd: "/work/api", turns: [{ user: "a" }] });
+  await liveUnder(s, "iTerm.app", "iTerm2");
+  srv = await hosted();
+  setTabs(w, []);
+  const tty = (await srv.session(s.id)).live?.tty;
+  if (!tty) return t.skip("the session stand-in has no tty here (no terminal runs the tests)");
+  fs.writeFileSync(iterm(), `/dev/${tty}\n`);
+  assert.deepEqual((await resume(s)).json, { focused: tty });
+  assert.ok(calls(w, "osascript").some((c) => c.script.includes('application "iTerm"') && c.script.includes("select s")));
+});
+
+test("on macOS a running session in Ghostty or WezTerm brings that app forward, never a second copy", { skip: !DARWIN }, async () => {
+  const s = addSession(w, { cwd: "/work/api", turns: [{ user: "a" }] });
+  await liveUnder(s, "Ghostty.app", "ghostty");
+  srv = await hosted();
+  setTabs(w, []);
+  const tty = (await srv.session(s.id)).live?.tty;
+  assert.deepEqual((await resume(s)).json, { focused: tty ?? "" });
+  assert.deepEqual(calls(w, "open")[0].args, ["-a", path.join(w.root, "apps", "Ghostty.app")]);
+  assert.ok(!calls(w, "osascript").some((c) => c.script.includes("do script")));
+});
+
 // --- herdr, wherever it runs
 const hcFile = () => path.join(w.root, "hc.json");
 const withHc = (env = {}) => {
@@ -135,6 +213,16 @@ test("a running session in a herdr terminal is shown there instead of opened aga
   assert.deepEqual((await resume(s)).json, { focused: "t4" });
   assert.deepEqual(calls(w, "herdr-app")[0].args, ["do", "agent.focus", "--terminal", "t4"]);
   assert.ok(!calls(w, "osascript").some((c) => c.script.includes("do script")), "no second copy opened");
+});
+
+test("a running session in a herdr terminal without herdr-app isn't an error", { skip: !DARWIN }, async () => {
+  const s = addSession(w, { cwd: "/work/api", turns: [{ user: "a" }] });
+  addLive(w, s);
+  fs.writeFileSync(hcFile(), JSON.stringify([{ address: "t4", pid: process.pid, fg: 5000, labels: { "hangar.session": s.id, "hangar.pid": String(process.pid) } }]));
+  srv = await withHc({ HANGAR_HERDR_APP: path.join(w.root, "no-herdr-app") });
+  setTabs(w, []);
+  const r = await resume(s);
+  assert.ok(r.status < 500, JSON.stringify(r.json));
 });
 
 test("an opener asked for wins over the herdr terminal that lost the session", { skip: !DARWIN }, async () => {

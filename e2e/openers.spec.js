@@ -39,8 +39,10 @@ async function standIn(page, { fail = false } = {}) {
     return null;
   });
 }
+// The session's detail (a click on a selected line would close it).
 const detail = async (page, title) => {
-  await page.locator("#list li", { hasText: title }).locator(".title").click();
+  const row = page.locator("#list li", { hasText: title });
+  if (!/\bsel\b/.test(await row.getAttribute("class"))) await row.locator(".title").click();
   return page.locator("#detail");
 };
 const srcs = (loc) => loc.locator("img").evaluateAll((imgs) => imgs.map((i) => i.getAttribute("src")));
@@ -100,12 +102,58 @@ test("the menu answers the keyboard and closes on Escape or a click elsewhere", 
   expect(calls).toEqual([]);
 });
 
+test("the menu closes when focus leaves it or the view changes, and the screen keeps up meanwhile", async ({ page }) => {
+  await standIn(page);
+  page = await srv.open(page);
+  const d = await detail(page, "Rate limiter");
+  await d.locator("#resumeMore").click();
+  await expect(d.getByRole("menu")).toHaveCount(1);
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  await expect(d.getByRole("menu")).toHaveCount(0);
+  await d.locator("#resumeMore").click();
+  await page.locator("#settingsBtn").click();
+  await expect(page.locator(".menu")).toHaveCount(0);
+  await expect(page.locator("#openerPicker")).toBeVisible();
+});
+
+test("herdr turned off in Settings leaves Resume's menu, and comes back turned on", async ({ page }) => {
+  const st = structuredClone(OPENERS);
+  let enabled = true;
+  await srv.intercept(page, ({ method, path, body }) => {
+    if (path === "/api/herdr") {
+      if (method === "PATCH") { enabled = body.enabled ?? enabled; return { json: { ok: true } }; }
+      return { json: { enabled, auto: true, hcPath: "", hc: "/u/hc", available: enabled, restorable: [] } };
+    }
+    if (path === "/api/openers") return { json: { ...st, openers: st.openers.filter((o) => enabled || o.app !== "herdr") } };
+    return null;
+  });
+  page = await srv.open(page);
+  await page.locator("#settingsBtn").click();
+  await page.locator("#herdrOn").uncheck();
+  await page.locator("#settingsBtn").click();
+  let d = await detail(page, "Rate limiter");
+  await d.locator("#resumeMore").click();
+  await expect(d.getByRole("menuitem")).toHaveText(["bash · Terminal"]);
+  await page.keyboard.press("Escape");
+  await page.locator("#settingsBtn").click();
+  await page.locator("#herdrOn").check();
+  await page.locator("#settingsBtn").click();
+  d = await detail(page, "Rate limiter");
+  await d.locator("#resumeMore").click();
+  await expect(d.getByRole("menuitem")).toHaveText(["bash · Terminal", "zsh · herdr", "bash · herdr"]);
+});
+
+// (Where its terminal can't be brought forward, a running session has no button at all: Windows without a console.)
 test("a running session's button brings its terminal forward, with no menu", async ({ page }) => {
   await standIn(page);
   page = await srv.open(page);
   const d = await detail(page, "Landing");
-  await expect(d.getByRole("button", { name: "Go to terminal" })).toBeVisible();
+  await expect(d.locator(".d-title .live")).toBeVisible();
   await expect(d.locator("#resumeMore")).toHaveCount(0);
+  await expect(d.locator("#resumeBtn")).toHaveCount(0);
+  if (process.platform === "darwin") await expect(d.getByRole("button", { name: "Go to terminal" })).toBeVisible();
 });
 
 test("without the openers, Resume is a plain button that opens with the default", async ({ page }) => {

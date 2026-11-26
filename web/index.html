@@ -296,6 +296,7 @@ let lastTab = view === "settings" ? "pending" : view;
 function showView(v) {
   if (v !== "settings") { lastTab = v; try { localStorage.setItem("view", v); } catch {} }
   view = v;
+  closeMenus(false);
   render();
 }
 
@@ -337,17 +338,25 @@ function openMenu(anchor, items, onPick, checked) {
   }));
   menu.onkeydown = (e) => {
     const bs = [...menu.querySelectorAll("button")], i = bs.indexOf(document.activeElement);
-    if (e.key === "Escape") { closeMenus(); anchor.focus(); }
+    // The render the menu held back may have drawn the anchor anew: found again by id.
+    if (e.key === "Escape") { closeMenus(); document.getElementById(anchor.id)?.focus(); }
     else if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); bs[(i + (e.key === "ArrowDown" ? 1 : bs.length - 1)) % bs.length]?.focus(); }
   };
+  // Focus leaving the menu (Tab, a shortcut) closes it, so nothing waits on it unseen.
+  // (Not while the menu is being taken away: that focus loss is its own.)
+  menu.addEventListener("focusout", (e) => {
+    if (!menusClosing && menu.isConnected && !menu.contains(e.relatedTarget) && e.relatedTarget !== anchor) closeMenus();
+  });
   anchor.setAttribute("aria-expanded", "true");
   anchor.parentElement.append(menu);
   menu.querySelector("button")?.focus();
 }
 // A render while a menu is open would take it away under the pointer: it waits for the menu to close.
-let renderPending = false;
+let renderPending = false, menusClosing = false;
 function closeMenus(rerender = true) {
+  menusClosing = true;
   document.querySelectorAll(".menu").forEach((m) => m.remove());
+  menusClosing = false;
   document.querySelectorAll("[aria-expanded=true]").forEach((a) => a.setAttribute("aria-expanded", "false"));
   if (rerender && renderPending) { renderPending = false; render(); }
 }
@@ -1102,7 +1111,8 @@ function openersSettings() {
 // herdr: the integration on or off, restoring on its own or only when asked, and the hc to call.
 function herdrSettings() {
   if (!herdr) return null;
-  const save = (patch, control) => act(() => api("PATCH", "/api/herdr", patch).then(loadHerdr), null, control);
+  // herdr on or off adds or takes away its openers.
+  const save = (patch, control) => act(() => api("PATCH", "/api/herdr", patch).then(() => Promise.all([loadHerdr(), loadOpeners()])), null, control);
   const on = el("input", { type: "checkbox", id: "herdrOn" });
   on.checked = herdr.enabled;
   on.onchange = () => save({ enabled: on.checked }, on);
@@ -1328,7 +1338,7 @@ async function load() {
   if (machine !== was) return load();
   [items, accounts, classifier] = got;
   // After the list's own calls, not beside them: the browser's six connections to the server are theirs first.
-  if (!machine) { loadHerdr(); if (!openers) loadOpeners(); }
+  if (!machine) { loadHerdr(); loadOpeners(); }
   // A color goes into style, and another machine's accounts can say anything: one that isn't a plain hex color
   // takes the palette's (the same as core/src/accounts.rs).
   accounts.forEach((a, i) => { if (!/^#[0-9a-f]{6}$/i.test(a.color)) a.color = PALETTE[i % PALETTE.length]; });

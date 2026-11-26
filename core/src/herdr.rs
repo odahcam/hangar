@@ -246,9 +246,20 @@ impl Hangar {
         if o.ok { Ok(()) } else { Err(o.err.trim().to_string()) }
     }
 
-    /// herdr is an opener: the integration is on and hc is there.
+    /// herdr is an opener: the integration is on and hc answers. What hc said is kept a few seconds: every Resume and
+    /// openers listing asks, and a hung hc would hold each of them for HC_WAIT.
     pub(crate) fn herdr_available(&self) -> bool {
-        self.hc().is_some_and(|b| json_of(&b, &["ls", "--json"]).is_some())
+        static SEEN: Mutex<Option<(std::time::Instant, String, bool)>> = Mutex::new(None);
+        let Some(bin) = self.hc() else { return false };
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, b, ok)) = seen.as_ref() {
+            if *b == bin && at.elapsed() < Duration::from_secs(10) {
+                return *ok;
+            }
+        }
+        let ok = json_of(&bin, &["ls", "--json"]).is_some();
+        *seen = Some((std::time::Instant::now(), bin, ok));
+        ok
     }
 
     /// herdr's window app: HANGAR_HERDR_APP (empty: none), else where it installs itself, else the PATH.
@@ -313,6 +324,10 @@ impl Hangar {
         let t = terminals(&bin)?.into_iter().find(|t| t.noted_session() == Some(id) && t.label(PID) == Some(&t.pid.to_string()))?;
         let app = self.herdr_app()?;
         let o = run(&app, &["do", "agent.focus", "--terminal", &t.addr], HC_WAIT);
+        // Without the window app there's no window to show it in.
+        if o.missing {
+            return None;
+        }
         if !o.ok {
             return Some(Err(ApiError(500, o.err.trim().to_string())));
         }

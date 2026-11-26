@@ -219,8 +219,12 @@ impl Hangar {
             }
         }
         // Running in a herdr terminal: that one is shown (a terminal app's tab list doesn't have it).
-        if live.is_some() {
+        if let Some(l) = live.as_ref() {
             if let Some(r) = self.herdr_focus(id) {
+                return r;
+            }
+            // In another terminal app: shown there, or said to be open; never a second copy.
+            if let Some(r) = self.focus_in_app(l.pid, l.tty.as_deref()) {
                 return r;
             }
         }
