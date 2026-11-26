@@ -85,9 +85,10 @@ pub(crate) fn shell_argv(shell: &Shell, cwd: &str, argv: &[String]) -> Result<Ve
         // The folder isn't in the line: Windows Terminal's --startingDirectory and the console's own folder give it.
         // Windows Terminal splits a command line and joins it again quoting only what has spaces, so an argument's
         // quotes can't be counted on: one holding what Command Prompt acts on outside quotes (& | < > ^ ( ) !, %VAR%
-        // even inside them, ") is refused. `call` first, so the line doesn't start with a quote (/k would strip it).
+        // even inside them, ", and , ; = which split its arguments) is refused. `call` first, so the line doesn't start
+        // with a quote (/k would strip it).
         Kind::Cmd => {
-            if argv.iter().any(|s| s.contains(['"', '%', '&', '|', '<', '>', '^', '(', ')', '!'])) {
+            if argv.iter().any(|s| s.contains(['"', '%', '&', '|', '<', '>', '^', '(', ')', '!', ',', ';', '='])) {
                 return Err("unsupported_path".into());
             }
             let _ = cwd;
@@ -514,7 +515,7 @@ mod tests {
         );
         let cmd = shell_argv(&sh(Kind::Cmd, "cmd.exe"), r"C:\R&D", &[r"C:\a b\hangar-resume.exe".to_string(), "id".to_string()]).unwrap();
         assert_eq!(win_cmdline(&cmd), r#"cmd.exe /k call "C:\a b\hangar-resume.exe" id"#, "the folder goes by the terminal, not the line");
-        for bad in ["100%", "R&D", "a|b", "a^b", "(a)", "a!b", "a<b"] {
+        for bad in ["100%", "R&D", "a|b", "a^b", "(a)", "a!b", "a<b", "a,b", "a;b", "a=b"] {
             assert!(shell_argv(&sh(Kind::Cmd, "cmd.exe"), r"C:\w", &[format!(r"C:\{bad}\h.exe")]).is_err(), "{bad}");
         }
     }
