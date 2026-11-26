@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { BIN, RESUME, DARWIN, WIN32, makeWorld, addSession, addLive, setTabs, calls, startServer, cleanup, waitFor } = require("./helpers");
+const { BIN, RESUME, DARWIN, WIN32, makeWorld, addAccount, addSession, addLive, setTabs, calls, startServer, cleanup, waitFor } = require("./helpers");
 
 let w, srv;
 beforeEach(() => { w = makeWorld(); });
@@ -292,19 +292,27 @@ test("on Windows PowerShell in Windows Terminal starts in the session's folder a
   assert.deepEqual(c.args.slice(5), [PS, "-NoLogo", "-NoExit", "-Command", line.replaceAll(";", "\\;")]);
 });
 
-test("on Windows Command Prompt in Windows Terminal changes to the folder and runs the helper", { skip: !WIN32 }, async () => {
-  const s = addSession(w, { cwd: String.raw`C:\work\p q`, turns: [{ user: "a" }] });
+// The folder goes by --startingDirectory, never into Command Prompt's line: wt splits a command line and joins it
+// again quoting only what has spaces, so C:\work\R&D in the line would run "D".
+test("on Windows Command Prompt in Windows Terminal runs the helper in the session's folder, a folder with & included", { skip: !WIN32 }, async () => {
+  const s = addSession(w, { cwd: String.raw`C:\work\R&D a&b`, turns: [{ user: "a" }] });
   srv = await startServer(w);
   assert.deepEqual((await resume(s, "cmd:wt")).json, { opened: true });
   const [c] = calls(w, "wt");
-  assert.deepEqual(c.args.slice(5), [CMD, "/k", "cd", "/d", String.raw`C:\work\p q`, "&&", RESUME, s.id, "--config", w.claude]);
+  assert.deepEqual(c.args.slice(3, 5), ["--startingDirectory", String.raw`C:\work\R&D a&b`]);
+  assert.deepEqual(c.args.slice(5), [CMD, "/k", "call", RESUME, s.id, "--config", w.claude]);
 });
 
-test("on Windows a folder Command Prompt would expand (%) is refused for it", { skip: !WIN32 }, async () => {
-  const s = addSession(w, { cwd: String.raw`C:\work\100%`, turns: [{ user: "a" }] });
-  srv = await startServer(w);
-  assert.deepEqual((await resume(s, "cmd:wt")).json, { error: "unsupported_path" });
-  assert.deepEqual(calls(w, "wt"), []);
+test("on Windows an argument Command Prompt would act on (&, %) is refused for it", { skip: !WIN32 }, async () => {
+  for (const name of ["claude-R&D", "claude-100%"]) {
+    const dir = addAccount(w, name);
+    const s = addSession(w, { claude: dir, cwd: String.raw`C:\work\p`, turns: [{ user: "a" }] });
+    srv = await startServer(w);
+    assert.deepEqual((await resume(s, "cmd:wt")).json, { error: "unsupported_path" }, name);
+    assert.deepEqual((await resume(s, "powershell:wt")).json, { opened: true }, "PowerShell's quoting holds it");
+    await srv.stop(); srv = null;
+  }
+  assert.ok(!calls(w, "wt").some((c) => c.args.includes(CMD)));
 });
 
 test("on Windows a console window gets the shell's command line, in the session's folder", { skip: !WIN32 }, async () => {

@@ -82,13 +82,16 @@ pub(crate) fn shell_argv(shell: &Shell, cwd: &str, argv: &[String]) -> Result<Ve
             let line = format!("Set-Location -LiteralPath {}; & {}", pwsh_quote(cwd), argv.iter().map(|a| pwsh_quote(a)).collect::<Vec<_>>().join(" "));
             [shell.path.as_str(), "-NoLogo", "-NoExit", "-Command", &line].into_iter().map(|a| Arg::Q(a.into())).collect()
         }
-        // Inside double quotes Command Prompt still expands %VAR%, and a double quote ends the string.
+        // The folder isn't in the line: Windows Terminal's --startingDirectory and the console's own folder give it.
+        // Windows Terminal splits a command line and joins it again quoting only what has spaces, so an argument's
+        // quotes can't be counted on: one holding what Command Prompt acts on outside quotes (& | < > ^ ( ) !, %VAR%
+        // even inside them, ") is refused. `call` first, so the line doesn't start with a quote (/k would strip it).
         Kind::Cmd => {
-            if std::iter::once(cwd).chain(argv.iter().map(String::as_str)).any(|s| s.contains(['"', '%'])) {
+            if argv.iter().any(|s| s.contains(['"', '%', '&', '|', '<', '>', '^', '(', ')', '!'])) {
                 return Err("unsupported_path".into());
             }
-            let line = format!("cd /d \"{cwd}\" && {}", argv.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(" "));
-            vec![Arg::Q(shell.path.clone()), Arg::Raw("/k".into()), Arg::Raw(line)]
+            let _ = cwd;
+            [Arg::Q(shell.path.clone()), Arg::Raw("/k".into()), Arg::Q("call".into())].into_iter().chain(argv.iter().map(|a| Arg::Q(a.clone()))).collect()
         }
         Kind::Login => vec![],
     })
@@ -509,11 +512,11 @@ mod tests {
             shell_argv(&sh(Kind::Pwsh, "pwsh.exe"), r"C:\it's", &argv).unwrap().last().unwrap(),
             &Arg::Q(r"Set-Location -LiteralPath 'C:\it''s'; & '/A/hangar-resume' 'id'".into())
         );
-        assert_eq!(
-            shell_argv(&sh(Kind::Cmd, "cmd.exe"), r"C:\a b", &argv).unwrap(),
-            vec![Arg::Q("cmd.exe".into()), Arg::Raw("/k".into()), Arg::Raw(r#"cd /d "C:\a b" && "/A/hangar-resume" "id""#.into())]
-        );
-        assert!(shell_argv(&sh(Kind::Cmd, "cmd.exe"), r"C:\100%", &argv).is_err());
+        let cmd = shell_argv(&sh(Kind::Cmd, "cmd.exe"), r"C:\R&D", &[r"C:\a b\hangar-resume.exe".to_string(), "id".to_string()]).unwrap();
+        assert_eq!(win_cmdline(&cmd), r#"cmd.exe /k call "C:\a b\hangar-resume.exe" id"#, "the folder goes by the terminal, not the line");
+        for bad in ["100%", "R&D", "a|b", "a^b", "(a)", "a!b", "a<b"] {
+            assert!(shell_argv(&sh(Kind::Cmd, "cmd.exe"), r"C:\w", &[format!(r"C:\{bad}\h.exe")]).is_err(), "{bad}");
+        }
     }
 
     #[test]
