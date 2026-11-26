@@ -76,11 +76,11 @@ async function launchWeb(w, env) {
   };
 }
 
-async function launchDesktop(w, env) {
+async function launchDesktop(w, env, args = []) {
   test.skip(!WIN32, "only WebView2 (Windows) can be driven over the DevTools protocol; test:build covers the macOS app");
   const profile = path.join(w.root, "webview");
   const log = fs.openSync(path.join(w.root, "app.log"), "a");
-  const proc = spawn(APP, [], {
+  const proc = spawn(APP, args, {
     env: {
       ...process.env,
       HANGAR_CLAUDE_DIRS: w.accounts.join(path.delimiter),
@@ -103,10 +103,11 @@ async function launchDesktop(w, env) {
     // The app's stderr goes to the world, so a failing spec can show why the app died.
     stdio: ["ignore", "ignore", log],
   });
-  let exited = false, stopping = false;
+  let exited = false, stopping = false, quitting = false;
+  const exit = new Promise((resolve) => proc.on("exit", resolve));
   proc.on("exit", (code) => {
     exited = true;
-    if (!stopping) console.error(`app exited (${code}) mid-test:\n` + fs.readFileSync(path.join(w.root, "app.log"), "utf8").slice(-2000));
+    if (!stopping && !quitting) console.error(`app exited (${code}) mid-test:\n` + fs.readFileSync(path.join(w.root, "app.log"), "utf8").slice(-2000));
   });
   const portFile = path.join(profile, "EBWebView", "DevToolsActivePort");
   let browser, page;
@@ -177,6 +178,24 @@ async function launchDesktop(w, env) {
     async intercept(_, fn) { stand.intercept(fn); },
     async slow(_, ms, prefix) { stand.slow(ms, prefix); },
     async fail(_, prefix, error) { stand.fail(prefix, error); },
+    // A menu or tray item of the app, picked (debug builds take it over IPC: see e2e_menu in app/src/main.rs).
+    async menu(id) {
+      await page.evaluate((id) => window.__TAURI__.core.invoke("e2e_menu", { id }), id).catch(() => {});
+    },
+    // The native window: whether it's shown, and its inner size in physical pixels.
+    async window() {
+      return page.evaluate(async () => {
+        const w = window.__TAURI__.window.getCurrentWindow();
+        const s = await w.innerSize();
+        return { visible: await w.isVisible(), width: s.width, height: s.height };
+      });
+    },
+    // The app quits by itself (a menu's Quit): resolves with its exit code.
+    async quits(fn) {
+      quitting = true;
+      await fn();
+      return exit;
+    },
     async stop() {
       stopping = true;
       await browser.close().catch(() => {});
@@ -187,5 +206,10 @@ async function launchDesktop(w, env) {
 }
 
 const launch = (w, env = {}) => (test.info().project.name === "desktop" ? launchDesktop : launchWeb)(w, env);
+// The desktop app alone, started with `args`: its window, menus and login item have no web counterpart.
+function launchApp(w, env = {}, args = []) {
+  test.skip(test.info().project.name !== "desktop", "the desktop app's own window, menus and login item");
+  return launchDesktop(w, env, args);
+}
 
-module.exports = { launch };
+module.exports = { launch, launchApp };
