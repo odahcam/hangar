@@ -5,8 +5,8 @@ const { test, expect } = require("@playwright/test");
 const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
-const { makeWorld, addSession, cleanup, waitFor, ROOT } = require("../test/helpers");
-const { launchApp } = require("./target");
+const { makeWorld, addSession, cleanup, waitFor } = require("../test/helpers");
+const { launchApp, APP } = require("./target");
 
 let w, app, stateFile;
 test.beforeEach(() => {
@@ -63,10 +63,14 @@ test("started without --hidden, the window shows", async () => {
   expect((await app.window()).visible).toBe(true);
 });
 
-// The login item: a Run key value, as the autostart plugin writes it: HKLM's when the app runs elevated (as on CI),
-// else HKCU's. These specs point it at the test build, so the person's own values are put back as they were.
-const RUNS = ["HKCU", "HKLM"].map((root) => root + "\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-const APP = path.join(ROOT, "target/debug/hangar.exe");
+// The login item: a value named after the app in a Run key, as the autostart plugin writes it: HKLM's when the app
+// runs elevated (as on CI), else HKCU's; turning it on or off also writes StartupApproved\Run (Task Manager's switch).
+// The installed Hangar's login item has the same name, so these keys are exported before each spec, the app's values
+// dropped (a spec starts with no login item), and put back from the export afterwards, types and all.
+const NAME = "Hangar";
+const WIN = "Software\\Microsoft\\Windows\\CurrentVersion\\";
+const KEYS = ["HKCU", "HKLM"].flatMap((root) => [`${root}\\${WIN}Run`, `${root}\\${WIN}Explorer\\StartupApproved\\Run`]);
+const RUNS = KEYS.filter((k) => k.endsWith("Version\\Run"));
 function runValues() {
   return RUNS.flatMap((key) => {
     let out = "";
@@ -76,18 +80,21 @@ function runValues() {
 }
 const ours = () => runValues().find((v) => v.data.toLowerCase().includes(APP.toLowerCase()));
 const setRun = ({ key, name, data }) => execFileSync("reg", ["add", key, "/v", name, "/t", "REG_SZ", "/d", data, "/f"]);
-const delRun = ({ key, name }) => { try { execFileSync("reg", ["delete", key, "/v", name, "/f"], { stdio: "ignore" }); } catch {} };
-const same = (a, b) => a.key === b.key && a.name === b.name && a.data === b.data;
+const reg = (...args) => { try { execFileSync("reg", args, { stdio: "ignore" }); return true; } catch { return false; } };
+const dropApp = () => KEYS.forEach((k) => reg("delete", k, "/v", NAME, "/f"));
 
 test.describe("the login item", () => {
   // One Run key for all of them.
   test.describe.configure({ mode: "serial" });
-  let before;
-  test.beforeEach(() => { before = runValues(); });
+  let exports;
+  test.beforeEach(() => {
+    exports = KEYS.map((k, i) => ({ k, file: path.join(w.root, `run${i}.reg`) })).filter(({ k, file }) => reg("export", k, file, "/y"));
+    dropApp();
+  });
   test.afterEach(async () => {
     await app?.stop(); app = null;
-    for (const v of runValues().filter((v) => !before.some((b) => same(b, v)))) delRun(v);
-    for (const b of before.filter((b) => !runValues().some((v) => same(b, v)))) setRun(b);
+    dropApp();
+    for (const { file } of exports) reg("import", file);
   });
 
   test("Open at Login starts Hangar with --hidden, and turned off it doesn't start it", async () => {

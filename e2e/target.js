@@ -180,7 +180,9 @@ async function launchDesktop(w, env, args = []) {
     async fail(_, prefix, error) { stand.fail(prefix, error); },
     // A menu or tray item of the app, picked (debug builds take it over IPC: see e2e_menu in app/src/main.rs).
     async menu(id) {
-      await page.evaluate((id) => window.__TAURI__.core.invoke("e2e_menu", { id }), id).catch(() => {});
+      const pick = page.evaluate((id) => window.__TAURI__.core.invoke("e2e_menu", { id }), id);
+      // Quit takes the page (and the call) down with the app.
+      await (quitting ? pick.catch(() => {}) : pick);
     },
     // The native window: whether it's shown, and its inner size in physical pixels.
     async window() {
@@ -191,10 +193,10 @@ async function launchDesktop(w, env, args = []) {
       });
     },
     // The app quits by itself (a menu's Quit): resolves with its exit code.
-    async quits(fn) {
+    async quits(fn, timeout = 15000) {
       quitting = true;
       await fn();
-      return exit;
+      return Promise.race([exit, new Promise((_, reject) => setTimeout(() => reject(new Error(`the app didn't quit within ${timeout} ms`)), timeout))]);
     },
     async stop() {
       stopping = true;
@@ -212,4 +214,4 @@ function launchApp(w, env = {}, args = []) {
   return launchDesktop(w, env, args);
 }
 
-module.exports = { launch, launchApp };
+module.exports = { launch, launchApp, APP };

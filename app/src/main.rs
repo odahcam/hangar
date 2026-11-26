@@ -88,7 +88,13 @@ fn refresh_login_item(app: &AppHandle) {
     let _ = app.state::<LoginItem>().0.set_checked(enabled);
 }
 
+/// A test instance leaves the login item alone (it would point it at the test build), unless a spec is about it.
+static LOGIN_ITEM: AtomicBool = AtomicBool::new(true);
+
 fn toggle_login_item(app: &AppHandle) {
+    if !LOGIN_ITEM.load(Ordering::SeqCst) {
+        return;
+    }
     let launcher = app.autolaunch();
     let result = if launcher.is_enabled().unwrap_or(false) { launcher.disable() } else { launcher.enable() };
     if let Err(e) = result {
@@ -177,8 +183,8 @@ fn main() {
     // Test instances run side by side on throwaway data: no single instance, no device identity in the real keychain.
     let test_instance = std::env::var_os("HANGAR_WEBVIEW_DATA").is_some();
     let hidden = std::env::args().any(|a| a == HIDDEN);
-    // A test instance leaves the login item alone (it would point it at the test build), unless a spec is about it.
     let login_item = !test_instance || std::env::var_os("HANGAR_E2E_LOGIN").is_some();
+    LOGIN_ITEM.store(login_item, Ordering::SeqCst);
     #[cfg(debug_assertions)]
     let handlers: fn(tauri::ipc::Invoke<Wry>) -> bool = tauri::generate_handler![api, e2e_menu];
     #[cfg(not(debug_assertions))]
