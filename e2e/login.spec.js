@@ -63,18 +63,21 @@ test("started without --hidden, the window shows", async () => {
   expect((await app.window()).visible).toBe(true);
 });
 
-// The login item: HKCU's Run key, as the autostart plugin writes it. These specs point it at the test build, so the
-// person's own (any value naming another Hangar) is put back as it was.
-const RUN = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+// The login item: a Run key value, as the autostart plugin writes it: HKLM's when the app runs elevated (as on CI),
+// else HKCU's. These specs point it at the test build, so the person's own values are put back as they were.
+const RUNS = ["HKCU", "HKLM"].map((root) => root + "\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const APP = path.join(ROOT, "target/debug/hangar.exe");
 function runValues() {
-  let out = "";
-  try { out = execFileSync("reg", ["query", RUN], { encoding: "utf8" }); } catch { return []; }
-  return out.split(/\r?\n/).map((l) => l.match(/^\s{4}(.+?)\s{4}REG_\w+\s{4}(.*)$/)).filter(Boolean).map(([, name, data]) => ({ name, data }));
+  return RUNS.flatMap((key) => {
+    let out = "";
+    try { out = execFileSync("reg", ["query", key], { encoding: "utf8" }); } catch { return []; }
+    return out.split(/\r?\n/).map((l) => l.match(/^\s+(.+?)\s{4}REG_\w+\s{4}(.*)$/)).filter(Boolean).map(([, name, data]) => ({ key, name, data }));
+  });
 }
 const ours = () => runValues().find((v) => v.data.toLowerCase().includes(APP.toLowerCase()));
-const setRun = (name, data) => execFileSync("reg", ["add", RUN, "/v", name, "/t", "REG_SZ", "/d", data, "/f"]);
-const delRun = (name) => { try { execFileSync("reg", ["delete", RUN, "/v", name, "/f"], { stdio: "ignore" }); } catch {} };
+const setRun = ({ key, name, data }) => execFileSync("reg", ["add", key, "/v", name, "/t", "REG_SZ", "/d", data, "/f"]);
+const delRun = ({ key, name }) => { try { execFileSync("reg", ["delete", key, "/v", name, "/f"], { stdio: "ignore" }); } catch {} };
+const same = (a, b) => a.key === b.key && a.name === b.name && a.data === b.data;
 
 test.describe("the login item", () => {
   // One Run key for all of them.
@@ -83,8 +86,8 @@ test.describe("the login item", () => {
   test.beforeEach(() => { before = runValues(); });
   test.afterEach(async () => {
     await app?.stop(); app = null;
-    for (const v of runValues().filter((v) => !before.some((b) => b.name === v.name && b.data === v.data))) delRun(v.name);
-    for (const b of before.filter((b) => !runValues().some((v) => v.name === b.name && v.data === b.data))) setRun(b.name, b.data);
+    for (const v of runValues().filter((v) => !before.some((b) => same(b, v)))) delRun(v);
+    for (const b of before.filter((b) => !runValues().some((v) => same(b, v)))) setRun(b);
   });
 
   test("Open at Login starts Hangar with --hidden, and turned off it doesn't start it", async () => {
@@ -101,9 +104,9 @@ test.describe("the login item", () => {
   test("a login item from before --hidden is written again with it", async () => {
     app = await start([], { HANGAR_E2E_LOGIN: "1" });
     await app.menu("login");
-    const { name } = await waitFor(() => ours());
+    const item = await waitFor(() => ours());
     await app.stop(); app = null;
-    setRun(name, `"${APP}"`);
+    setRun({ ...item, data: `"${APP}"` });
     app = await start([], { HANGAR_E2E_LOGIN: "1" });
     await waitFor(() => /--hidden/.test(ours()?.data ?? ""));
   });
