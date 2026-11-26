@@ -242,7 +242,7 @@ impl Hangar {
             }
         }
         let (cwd, argv) = self.resume_line(id)?;
-        self.open_with(opener, &cwd, &argv)?;
+        self.open_with(opener, id, &cwd, &argv)?;
         Ok(json!({ "opened": true }))
     }
 
@@ -259,11 +259,16 @@ impl Hangar {
             }
             let _ = fs::copy(&saved, file);
         }
-        // A transcript with no message yet records no cwd. Opening somewhere else would have Claude Code ask to trust it.
-        let cwd = nonempty(&t.cwd)
-            .or(live.as_ref().and_then(|l| nonempty(&l.cwd)))
-            .map(String::from)
+        // claude --resume looks for the session under the project folder named after where it runs, which is where the
+        // session started: the transcript's last cwd (a session that cd'd elsewhere) would find nothing. The folder
+        // whose name is the transcript's project folder wins, else the one that folder decodes to; a transcript with
+        // no message yet records no cwd. Opening somewhere else would have Claude Code ask to trust it.
+        let slug = |p: &str| p.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+        let project = file.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("");
+        let seen: Vec<String> = [nonempty(&t.cwd), live.as_ref().and_then(|l| nonempty(&l.cwd))].into_iter().flatten().map(String::from).collect();
+        let cwd = seen.iter().find(|c| slug(c) == project).cloned()
             .or_else(|| cwd_from_project(file))
+            .or_else(|| seen.first().cloned())
             .ok_or_else(|| ApiError(409, "folder_unknown".into()))?;
         let config = config_dir(file).filter(|d| !accounts::is_default(d));
         // The cwd comes verbatim from the transcript and both paths are typed into a terminal: quoting stops the shell,

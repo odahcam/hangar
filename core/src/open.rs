@@ -8,7 +8,8 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-const PREF: &str = "opener";
+const PREF_SHELL: &str = "opener_shell";
+const PREF_APP: &str = "opener_app";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[allow(dead_code)] // each platform has some of these
@@ -276,17 +277,37 @@ impl Hangar {
         wanted.into_iter().find(|w| openers.iter().any(|(id, ..)| id == w)).or_else(|| openers.first().map(|(id, ..)| id.clone()))
     }
 
-    fn preferred_opener(&self) -> String {
-        db::get_meta(&self.db(), PREF).ok().flatten().unwrap_or_default()
+    /// The shell and the terminal set in Settings ("" each: the system's).
+    fn preferred(&self) -> (String, String) {
+        let db = self.db();
+        let get = |k| db::get_meta(&db, k).ok().flatten().unwrap_or_default();
+        (get(PREF_SHELL), get(PREF_APP))
     }
 
-    /// GET /api/openers: every pair, the shells and apps with their names and icons, the system's, the one set in
-    /// Settings ("" for none) and the one Resume uses.
+    /// Resume's opener: the shell and the terminal set in Settings, each else the system's. A shell the terminal can't
+    /// take (Command Prompt in herdr) gives way to the system's shell there, else to the terminal's first.
+    fn default_opener(&self, openers: &[(String, Shell, App)]) -> Option<String> {
+        let system = self.system_opener(openers)?;
+        let (sys_shell, sys_app) = system.split_once(':').map(|(s, a)| (s.to_string(), a.to_string()))?;
+        let (ps, pa) = self.preferred();
+        let known = |f: &dyn Fn(&(String, Shell, App)) -> bool| openers.iter().any(f);
+        let shell = if known(&|(_, s, _)| s.id == ps) { ps } else { sys_shell.clone() };
+        let app = if known(&|(_, _, a)| a.id == pa) { pa } else { sys_app };
+        [format!("{shell}:{app}"), format!("{sys_shell}:{app}")]
+            .into_iter()
+            .find(|id| known(&|(o, ..)| o == id))
+            .or_else(|| openers.iter().find(|(_, _, a)| a.id == app).map(|(id, ..)| id.clone()))
+            .or(Some(system))
+    }
+
+    /// GET /api/openers: every pair, the shells and terminals with their names and icons, the system's pair, the shell
+    /// and terminal set in Settings ("" each for none) and the pair Resume uses.
     pub(crate) fn openers_status(&self) -> Value {
         let openers = self.openers();
         let system = self.system_opener(&openers);
-        let preferred = self.preferred_opener();
-        let default = Some(preferred.clone()).filter(|p| openers.iter().any(|(id, ..)| id == p)).or(system.clone());
+        let (ps, pa) = self.preferred();
+        let preferred = json!({ "shell": ps, "app": pa });
+        let default = self.default_opener(&openers);
         let mut paths: Vec<String> = openers.iter().flat_map(|(_, s, a)| [s.path.clone(), a.icon.clone()]).filter(|p| !p.is_empty()).collect();
         paths.sort();
         paths.dedup();
@@ -302,25 +323,36 @@ impl Hangar {
         })
     }
 
-    /// PATCH /api/openers: { preferred } ("" goes back to the system's).
+    /// PATCH /api/openers: { shell?, app? } ("" goes back to the system's).
     pub(crate) fn set_opener(&self, body: &Value) -> ApiResult {
-        let p = body["preferred"].as_str().ok_or_else(|| ApiError(400, "preferred".into()))?;
-        if !p.is_empty() && !self.openers().iter().any(|(id, ..)| id == p) {
-            return Err(ApiError(400, "unknown_opener".into()));
+        let openers = self.openers();
+        let mut set = vec![];
+        for (key, meta) in [("shell", PREF_SHELL), ("app", PREF_APP)] {
+            match &body[key] {
+                Value::Null => {}
+                Value::String(v) => {
+                    let found = openers.iter().any(|(_, s, a)| if key == "shell" { s.id == *v } else { a.id == v.as_str() });
+                    if !v.is_empty() && !found {
+                        return Err(ApiError(400, format!("unknown_{key}")));
+                    }
+                    set.push((meta, v.clone()));
+                }
+                _ => return Err(ApiError(400, key.into())),
+            }
         }
-        db::set_meta(&self.db(), PREF, p)?;
+        let db = self.db();
+        for (meta, v) in set {
+            db::set_meta(&db, meta, &v)?;
+        }
         Ok(json!({ "ok": true }))
     }
 
-    /// Opens `argv` in `cwd` with opener `id` (None: the default).
-    pub(crate) fn open_with(&self, id: Option<&str>, cwd: &str, argv: &[String]) -> ApiResult<()> {
+    /// Opens session `session` (`argv` in `cwd`) with opener `id` (None: the default).
+    pub(crate) fn open_with(&self, id: Option<&str>, session: &str, cwd: &str, argv: &[String]) -> ApiResult<()> {
         let openers = self.openers();
         let id = match id {
             Some(i) => i.to_string(),
-            None => {
-                let p = self.preferred_opener();
-                if openers.iter().any(|(o, ..)| *o == p) { p } else { self.system_opener(&openers).unwrap_or_default() }
-            }
+            None => self.default_opener(&openers).unwrap_or_default(),
         };
         let Some((_, shell, app)) = openers.iter().find(|(o, ..)| *o == id) else {
             // No shell or app found (an unknown platform): the platform's own way.
@@ -330,7 +362,7 @@ impl Hangar {
             return Err(ApiError(400, "unknown_opener".into()));
         };
         let line = shell_argv(shell, cwd, argv).map_err(|e| ApiError(409, e))?;
-        self.launch(shell, app, cwd, argv, &line).map_err(|e| ApiError(500, e))
+        self.launch(shell, app, session, cwd, argv, &line).map_err(|e| ApiError(500, e))
     }
 
     /// macOS: a running session that isn't in a Terminal tab is in another terminal app (its process's ancestors say
@@ -362,7 +394,7 @@ impl Hangar {
     }
 
     #[cfg(target_os = "macos")]
-    fn launch(&self, shell: &Shell, app: &App, cwd: &str, argv: &[String], line: &[Arg]) -> Result<(), String> {
+    fn launch(&self, shell: &Shell, app: &App, session: &str, cwd: &str, argv: &[String], line: &[Arg]) -> Result<(), String> {
         use crate::platform::macos as mac;
         let words: Vec<String> = line.iter().map(|a| a.text().to_string()).collect();
         let exec = format!("exec {}", words.iter().map(|w| posix_quote(w)).collect::<Vec<_>>().join(" "));
@@ -383,24 +415,24 @@ impl Hangar {
                 c.args(["start", "--cwd", cwd, "--"]).args(&words);
                 spawn_detached(c)
             }
-            "herdr" => self.herdr_open(cwd, &words),
+            "herdr" => self.herdr_open(session, cwd, &words),
             other => Err(format!("unknown app {other}")),
         }
     }
 
     #[cfg(windows)]
-    fn launch(&self, _: &Shell, app: &App, cwd: &str, _: &[String], line: &[Arg]) -> Result<(), String> {
+    fn launch(&self, _: &Shell, app: &App, session: &str, cwd: &str, _: &[String], line: &[Arg]) -> Result<(), String> {
         use crate::platform::windows as win;
         match app.id {
             "wt" => win::wt_tab(cwd, line),
             "console" => win::console(cwd, line),
-            "herdr" => self.herdr_open(cwd, &line.iter().map(|a| a.text().to_string()).collect::<Vec<_>>()),
+            "herdr" => self.herdr_open(session, cwd, &line.iter().map(|a| a.text().to_string()).collect::<Vec<_>>()),
             other => Err(format!("unknown app {other}")),
         }
     }
 
     #[cfg(not(any(target_os = "macos", windows)))]
-    fn launch(&self, _: &Shell, _: &App, cwd: &str, argv: &[String], _: &[Arg]) -> Result<(), String> {
+    fn launch(&self, _: &Shell, _: &App, _: &str, cwd: &str, argv: &[String], _: &[Arg]) -> Result<(), String> {
         self.platform.open(cwd, argv)
     }
 }

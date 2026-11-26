@@ -34,7 +34,7 @@ test("on macOS the openers are zsh and bash in each terminal app found, the logi
   srv = await startServer(w);
   const o = (await srv.api("GET", "/api/openers")).json;
   assert.deepEqual(o.openers.map((x) => x.id), ["zsh:terminal", "bash:terminal", "zsh:iterm", "bash:iterm", "zsh:ghostty", "bash:ghostty", "zsh:wezterm", "bash:wezterm"]);
-  assert.deepEqual([o.system, o.preferred, o.default], ["zsh:terminal", "", "zsh:terminal"]);
+  assert.deepEqual([o.system, o.preferred, o.default], ["zsh:terminal", { shell: "", app: "" }, "zsh:terminal"]);
   assert.deepEqual(Object.fromEntries(Object.entries(o.apps).map(([k, v]) => [k, v.name])), { terminal: "Terminal", iterm: "iTerm2", ghostty: "Ghostty", wezterm: "WezTerm" });
   assert.deepEqual(Object.fromEntries(Object.entries(o.shells).map(([k, v]) => [k, v.name])), { zsh: "zsh", bash: "bash" });
 });
@@ -168,6 +168,19 @@ test("on macOS a running session in Ghostty or WezTerm brings that app forward, 
   assert.ok(!calls(w, "osascript").some((c) => c.script.includes("do script")));
 });
 
+// claude --resume finds a session under the project folder named after where it runs: where it started, not where it
+// cd'd to last.
+test("a session that moved to another folder resumes where its transcript's project is", { skip: !DARWIN }, async () => {
+  const started = path.join(w.root, "started"), moved = path.join(w.root, "started", "moved");
+  fs.mkdirSync(moved, { recursive: true });
+  const s = addSession(w, { cwd: started, turns: [{ user: "a" }, { user: "b" }] });
+  fs.writeFileSync(s.file, fs.readFileSync(s.file, "utf8").replaceAll(JSON.stringify(started), JSON.stringify(moved)));
+  srv = await startServer(w);
+  assert.deepEqual((await resume(s)).json, { opened: true });
+  const [c] = calls(w, "osascript").filter((c) => c.script.includes("do script"));
+  assert.ok(c.script.includes(`cd ${q(started)}\\ncd ${q(started)} && `), c.script);
+});
+
 // --- herdr, wherever it runs
 const hcFile = () => path.join(w.root, "hc.json");
 const withHc = (env = {}) => {
@@ -176,16 +189,94 @@ const withHc = (env = {}) => {
 };
 const shellOf = () => DARWIN ? "zsh" : "powershell";
 
-test("with hc, herdr is an opener; herdr-app opens a tab running the shell in the session's folder", { skip: !DARWIN && !WIN32 }, async () => {
-  const s = addSession(w, { cwd: DARWIN ? "/work/api" : String.raw`C:\work\api`, turns: [{ user: "a" }] });
-  srv = await withHc({ HANGAR_HERDR_APP: path.join(BIN, "herdr-app.js") });
+// herdr opens a tab in the space shown, which may be another machine's (a Windows one, given a macOS folder): the
+// tab goes to one of this machine's spaces.
+const work = (p) => DARWIN ? `/work/${p}` : String.raw`C:\work\${p}`;
+// Spaces as herdr-app lists them ({ id, folder, machine, active, terminals: [{ address, cwd }] }), their terminals'
+// folders as hc lists them. A space's own folder says nothing of where its terminals are.
+const spaces = (list) => {
+  const f = path.join(w.root, "spaces.json");
+  fs.writeFileSync(f, JSON.stringify({ spaces: list.map(({ terminals = [], ...s }) => ({ ...s, tabs: [{ id: "tb", terminals: terminals.map((t) => ({ terminal: t.address })) }] })) }));
+  fs.writeFileSync(hcFile(), JSON.stringify(list.flatMap((s) => s.terminals ?? []).map((t, i) => ({ pid: 9000 + i, fg: 9100 + i, labels: {}, ...t }))));
+  return { HANGAR_HERDR_APP: path.join(BIN, "herdr-app.js"), FAKE_HERDR_SPACES: f };
+};
+const opened = () => calls(w, "herdr-app").find((c) => c.args[0] === "do");
+
+test("with hc, herdr is an opener; herdr-app opens a tab running the shell in this machine's space working in the folder", { skip: !DARWIN && !WIN32 }, async () => {
+  const s = addSession(w, { cwd: work("api/src"), turns: [{ user: "a" }] });
+  srv = await withHc(spaces([
+    { id: "spW", folder: work("api"), machine: "box", active: true, terminals: [{ address: "box/t1", cwd: work("api") }] },
+    { id: "spA", folder: work("api/src"), machine: null, active: true, terminals: [{ address: "t7", cwd: work("other") }] },
+    { id: "spB", folder: work(""), machine: null, active: false, terminals: [{ address: "t6", cwd: work("") }] },
+    { id: "spC", folder: work("other"), machine: null, active: false, terminals: [{ address: "t5", cwd: work("api") }] },
+  ]));
   assert.ok((await ids()).includes(`${shellOf()}:herdr`));
   assert.ok(!(await ids()).includes("cmd:herdr"), "Command Prompt's syntax doesn't survive herdr's argv");
   assert.deepEqual((await resume(s, `${shellOf()}:herdr`)).json, { opened: true });
-  const [c] = calls(w, "herdr-app");
-  assert.deepEqual([c.args[0], c.args[1], c.args[2], c.args[4], c.args[5]], ["do", "terminal.open", "--argv", "--folder", s.cwd]);
-  const argv = JSON.parse(c.args[3]);
-  assert.ok(argv.some((a) => a.includes(s.id)), c.args[3]);
+  const c = opened();
+  assert.deepEqual([...c.args.slice(0, 6), c.args[6]], ["do", "tab.new", "--space", "spC", "--folder", s.cwd, "--argv"]);
+  assert.ok(JSON.parse(c.args[7]).some((a) => a.includes(s.id)), c.args[7]);
+});
+
+test("without a local space working in the folder, the tab goes to the local one shown, whatever the spaces' own folders", { skip: !DARWIN && !WIN32 }, async () => {
+  const s = addSession(w, { cwd: work("api"), turns: [{ user: "a" }] });
+  srv = await withHc(spaces([
+    { id: "spW", folder: work(""), machine: "box", active: true },
+    { id: "spA", folder: work("api"), machine: null, active: false, terminals: [{ address: "t7", cwd: work("other") }] },
+    { id: "spB", folder: "", machine: null, active: true },
+  ]));
+  await resume(s, `${shellOf()}:herdr`);
+  assert.equal(opened().args[3], "spB");
+});
+
+test("Resume in herdr opens in the space the session last ran in, while that space is there", { skip: !DARWIN }, async () => {
+  const s = addSession(w, { cwd: work("api"), turns: [{ user: "a" }] });
+  const env = spaces([
+    { id: "spOld", folder: "", machine: null, active: false },
+    { id: "spNow", folder: "", machine: null, active: true, terminals: [{ address: "t8", cwd: work("api") }] },
+  ]);
+  // It runs in herdr's t4, shown in spOld (the claude stand-in is this process's child).
+  const live = addLive(w, s);
+  const t4 = { address: "t4", pid: process.pid, fg: 5000, cwd: work("api"), labels: { "herdr.space": "spOld" } };
+  fs.writeFileSync(hcFile(), JSON.stringify([t4, ...JSON.parse(fs.readFileSync(hcFile(), "utf8"))]));
+  srv = await withHc(env);
+  await waitFor(() => JSON.parse(fs.readFileSync(hcFile(), "utf8")).find((t) => t.address === "t4").labels["hangar.session"] === s.id);
+  // It exits and its tab is closed.
+  live.kill();
+  fs.writeFileSync(hcFile(), JSON.stringify(JSON.parse(fs.readFileSync(hcFile(), "utf8")).filter((t) => t.address !== "t4")));
+  await waitFor(async () => !(await srv.session(s.id)).live);
+  assert.deepEqual((await resume(s, "zsh:herdr")).json, { opened: true });
+  assert.deepEqual(opened().args.slice(0, 4), ["do", "tab.new", "--space", "spOld"]);
+  // Once that space is closed, the one working in the folder.
+  fs.writeFileSync(env.FAKE_HERDR_SPACES, JSON.stringify({ spaces: JSON.parse(fs.readFileSync(env.FAKE_HERDR_SPACES, "utf8")).spaces.filter((x) => x.id !== "spOld") }));
+  assert.deepEqual((await resume(s, "zsh:herdr")).json, { opened: true });
+  assert.equal(calls(w, "herdr-app").filter((c) => c.args[0] === "do").at(-1).args[3], "spNow");
+});
+
+test("between local spaces working as deep in the folder, the one shown wins", { skip: !DARWIN && !WIN32 }, async () => {
+  const s = addSession(w, { cwd: work("api"), turns: [{ user: "a" }] });
+  srv = await withHc(spaces([
+    { id: "spA", folder: "", machine: null, active: false, terminals: [{ address: "t7", cwd: work("") }] },
+    { id: "spB", folder: "", machine: null, active: true, terminals: [{ address: "t8", cwd: work("") }] },
+    { id: "spC", folder: "", machine: null, active: false, terminals: [{ address: "t9", cwd: work("") }] },
+  ]));
+  await resume(s, `${shellOf()}:herdr`);
+  assert.equal(opened().args[3], "spB");
+});
+
+test("with only other machines' spaces, the tab opens in a new space of this machine", { skip: !DARWIN && !WIN32 }, async () => {
+  const s = addSession(w, { cwd: work("api"), turns: [{ user: "a" }] });
+  srv = await withHc(spaces([{ id: "spW", folder: work(""), machine: "box", active: true }]));
+  assert.deepEqual((await resume(s, `${shellOf()}:herdr`)).json, { opened: true });
+  assert.deepEqual(opened().args.slice(0, 6), ["do", "space.new", "--machine", "", "--folder", s.cwd]);
+});
+
+test("what herdr-app says went wrong is the error", { skip: !DARWIN }, async () => {
+  const s = addSession(w, { cwd: work("api"), turns: [{ user: "a" }] });
+  const bad = path.join(w.root, "herdr-app-bad.js");
+  fs.writeFileSync(bad, `process.stdout.write(process.argv[2] === "ls" ? '{"spaces":[]}' : JSON.stringify({ error: "cannot start a terminal: the directory name is invalid" })); process.exit(process.argv[2] === "ls" ? 0 : 1);`);
+  srv = await withHc({ HANGAR_HERDR_APP: bad });
+  assert.deepEqual((await resume(s, "zsh:herdr")).json, { error: "cannot start a terminal: the directory name is invalid" });
 });
 
 test("without herdr-app, herdr's opener starts a kept terminal of hc's own", { skip: !DARWIN && !WIN32 }, async () => {
@@ -237,26 +328,38 @@ test("an opener asked for wins over the herdr terminal that lost the session", {
 });
 
 // --- the default, set in Settings
-test("the opener set in Settings is Resume's default; \"\" goes back to the system's", { skip: !DARWIN && !WIN32 }, async () => {
-  const s = addSession(w, { cwd: DARWIN ? "/work/api" : String.raw`C:\work\api`, turns: [{ user: "a" }] });
+test("the shell and the terminal set in Settings, each apart, make Resume's default; \"\" goes back to the system's", { skip: !DARWIN }, async () => {
+  bundle("Ghostty.app");
+  const s = addSession(w, { cwd: "/work/api", turns: [{ user: "a" }] });
   srv = await startServer(w);
-  const { system } = (await srv.api("GET", "/api/openers")).json;
-  const other = (await ids()).find((id) => id !== system);
-  assert.deepEqual((await srv.api("PATCH", "/api/openers", { preferred: other })).json, { ok: true });
-  const o = (await srv.api("GET", "/api/openers")).json;
-  assert.deepEqual([o.preferred, o.default], [other, other]);
-  assert.deepEqual((await srv.api("PATCH", "/api/openers", { preferred: "" })).json, { ok: true });
-  assert.equal((await srv.api("GET", "/api/openers")).json.default, o.system);
-  assert.equal((await srv.api("PATCH", "/api/openers", { preferred: "nope:none" })).status, 400);
-  assert.equal((await srv.api("PATCH", "/api/openers", { preferred: 3 })).status, 400);
+  const get = async () => (await srv.api("GET", "/api/openers")).json;
+  assert.deepEqual((await get()).preferred, { shell: "", app: "" });
+  assert.deepEqual((await srv.api("PATCH", "/api/openers", { app: "ghostty" })).json, { ok: true });
+  assert.deepEqual([(await get()).preferred, (await get()).default], [{ shell: "", app: "ghostty" }, "zsh:ghostty"]);
+  await srv.api("PATCH", "/api/openers", { shell: "bash" });
+  assert.deepEqual([(await get()).preferred, (await get()).default], [{ shell: "bash", app: "ghostty" }, "bash:ghostty"]);
+  await srv.api("PATCH", "/api/openers", { app: "" });
+  assert.equal((await get()).default, "bash:terminal", "the shell stays when the terminal goes back to the system's");
+  await srv.api("PATCH", "/api/openers", { shell: "" });
+  assert.equal((await get()).default, (await get()).system);
+  assert.equal((await srv.api("PATCH", "/api/openers", { shell: "nope" })).status, 400);
+  assert.equal((await srv.api("PATCH", "/api/openers", { app: "nope" })).status, 400);
+  assert.equal((await srv.api("PATCH", "/api/openers", { app: 3 })).status, 400);
   assert.deepEqual((await resume(s, "nope:none")).json, { error: "unknown_opener" });
   assert.equal((await resume(s, 7)).status, 400);
 });
 
-test("Resume without an opener uses the one set in Settings", { skip: !DARWIN }, async () => {
+test("a shell the terminal set in Settings can't take gives way to one it can", { skip: !WIN32 }, async () => {
+  fs.writeFileSync(path.join(w.root, "hc.json"), "[]");
+  srv = await startServer(w, { HANGAR_HC: path.join(BIN, "hc.js"), FAKE_HC: path.join(w.root, "hc.json") });
+  await srv.api("PATCH", "/api/openers", { shell: "cmd", app: "herdr" });
+  assert.equal((await srv.api("GET", "/api/openers")).json.default, "powershell:herdr");
+});
+
+test("Resume without an opener uses the shell and terminal set in Settings", { skip: !DARWIN }, async () => {
   const s = addSession(w, { cwd: "/work/api", turns: [{ user: "a" }] });
   srv = await startServer(w);
-  await srv.api("PATCH", "/api/openers", { preferred: "bash:terminal" });
+  await srv.api("PATCH", "/api/openers", { shell: "bash" });
   assert.deepEqual((await resume(s)).json, { opened: true });
   assert.ok(calls(w, "osascript").some((c) => c.script.includes("exec '/bin/bash'")));
 });

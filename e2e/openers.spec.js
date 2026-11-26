@@ -11,7 +11,7 @@ const OPENERS = {
     { id: "zsh:herdr", shell: "zsh", app: "herdr" }, { id: "bash:herdr", shell: "bash", app: "herdr" }],
   shells: { zsh: { name: "zsh", icon: png("zs") }, bash: { name: "bash", icon: png("ba") } },
   apps: { terminal: { name: "Terminal", icon: png("te") }, herdr: { name: "herdr", icon: null } },
-  system: "zsh:terminal", preferred: "", default: "zsh:terminal",
+  system: "zsh:terminal", preferred: { shell: "", app: "" }, default: "zsh:terminal",
 };
 
 let w, srv, id, calls;
@@ -23,16 +23,18 @@ test.beforeEach(async () => {
 });
 test.afterEach(async () => { await srv?.stop(); srv = null; if (w) cleanup(w); w = null; });
 
-// The core's openers, with the default following what Settings set; every resume and PATCH recorded.
-async function standIn(page, { fail = false } = {}) {
-  const st = structuredClone(OPENERS);
+// The core's openers, with the default following what Settings set (as open.rs: the shell and terminal set, each
+// else the system's; a pair that doesn't exist gives way to the terminal's first); every resume and PATCH recorded.
+async function standIn(page, { fail = false, extra = {} } = {}) {
+  const st = { ...structuredClone(OPENERS), ...extra };
   calls = [];
   await srv.intercept(page, ({ method, path, body }) => {
     if (path === "/api/openers" && method === "GET") return fail ? { status: 500, json: { error: "boom" } } : { json: st };
     if (path === "/api/openers" && method === "PATCH") {
       calls.push({ method, path, body });
-      st.preferred = body.preferred;
-      st.default = body.preferred || st.system;
+      st.preferred = { ...st.preferred, ...body };
+      const [ss, sa] = st.system.split(":"), app = st.preferred.app || sa, shell = st.preferred.shell || ss;
+      st.default = [`${shell}:${app}`, `${ss}:${app}`].find((i) => st.openers.some((o) => o.id === i)) ?? st.openers.find((o) => o.app === app)?.id;
       return { json: { ok: true } };
     }
     if (path.startsWith("/api/resume/")) { calls.push({ method, path, body }); return { json: { opened: true } }; }
@@ -57,6 +59,24 @@ test("Resume shows the default opener's shell and app icons, names it on hover, 
   expect(await srcs(main)).toEqual([png("zs"), png("te")]);
   await main.click();
   await expect.poll(() => calls).toEqual([{ method: "POST", path: `/api/resume/${id}`, body: null }]);
+});
+
+// Its own class: the list/detail layout is .split, and the two once shared styles (halves apart, layout broken).
+test("Resume's two halves sit together, the same height, the menu under them, the page's layout untouched", async ({ page }) => {
+  await standIn(page);
+  page = await srv.open(page);
+  const d = await detail(page, "Rate limiter");
+  expect(await page.locator("#split").evaluate((e) => getComputedStyle(e).display)).toBe("grid");
+  const [main, more] = [await d.locator("#resumeBtn").boundingBox(), await d.locator("#resumeMore").boundingBox()];
+  expect(Math.abs(main.x + main.width - more.x)).toBeLessThan(1);
+  expect(Math.abs(main.height - more.height)).toBeLessThan(1);
+  expect(Math.abs(main.y - more.y)).toBeLessThan(1);
+  await d.locator("#resumeMore").click();
+  const menu = await d.getByRole("menu").boundingBox();
+  expect(Math.abs(menu.x - main.x)).toBeLessThan(1);
+  expect(menu.y).toBeGreaterThan(main.y + main.height);
+  const panel = await page.locator("#detail").boundingBox();
+  expect(menu.x).toBeGreaterThanOrEqual(panel.x);
 });
 
 test("Resume's menu lists the other openers, shell first, with their icons, and opens with the one picked", async ({ page }) => {
@@ -115,7 +135,27 @@ test("the menu closes when focus leaves it or the view changes, and the screen k
   await d.locator("#resumeMore").click();
   await page.locator("#settingsBtn").click();
   await expect(page.locator(".menu")).toHaveCount(0);
-  await expect(page.locator("#openerPicker")).toBeVisible();
+  await expect(page.locator("#appPicker")).toBeVisible();
+});
+
+// WebKit (the macOS app) doesn't focus a button it clicks: the menu loses focus to nothing before the click lands.
+test("an item is picked even when the click takes focus away to nothing, as WebKit's does", async ({ page }) => {
+  await standIn(page);
+  page = await srv.open(page);
+  await page.locator("#settingsBtn").click();
+  await page.locator("#appPicker").click();
+  const herdr = page.getByRole("menuitemradio", { name: "herdr" });
+  await herdr.evaluate((b) => b.addEventListener("mousedown", () => document.activeElement.blur(), { once: true }));
+  await herdr.click();
+  await expect.poll(() => calls).toEqual([{ method: "PATCH", path: "/api/openers", body: { app: "herdr" } }]);
+  await expect(page.locator("#appPicker")).toHaveText("herdr ▾");
+  await page.locator("#settingsBtn").click();
+  const d = await detail(page, "Rate limiter");
+  await d.locator("#resumeMore").click();
+  const item = d.getByRole("menuitem").first();
+  await item.evaluate((b) => b.addEventListener("mousedown", () => document.activeElement.blur(), { once: true }));
+  await item.click();
+  await expect.poll(() => calls.at(-1)?.path).toMatch(/^\/api\/resume\//);
 });
 
 test("herdr turned off in Settings leaves Resume's menu, and comes back turned on", async ({ page }) => {
@@ -175,35 +215,60 @@ test("while it opens, the main half says so and the arrow waits", async ({ page 
   await expect(d.locator("#resumeMore")).toBeDisabled();
 });
 
-test("Settings set the default opener, shown with its icons; the system's comes back with its own choice", async ({ page }) => {
+test("Settings set the terminal and the shell apart, each shown with its icon; the system's comes back", async ({ page }) => {
   await standIn(page);
   page = await srv.open(page);
   await page.locator("#settingsBtn").click();
-  const picker = page.locator("#openerPicker");
-  await expect(picker).toHaveText("System default (zsh · Terminal) ▾");
-  await picker.click();
+  const app = page.locator("#appPicker"), shell = page.locator("#shellPicker");
+  await expect(app).toHaveText("System default (Terminal) ▾");
+  await expect(shell).toHaveText("System default (zsh) ▾");
+  await expect(page.locator(".pickhint")).toHaveText([
+    "The terminal emulator: the window the shell runs in (Terminal, iTerm2, Ghostty, WezTerm, Windows Terminal, herdr).",
+    "The command interpreter (zsh, bash, PowerShell, Command Prompt).",
+  ]);
+  await shell.click();
   const items = page.getByRole("menuitemradio");
-  await expect(items).toHaveText(["System default (zsh · Terminal)", "zsh · Terminal", "bash · Terminal", "zsh · herdr", "bash · herdr"]);
+  await expect(items).toHaveText(["System default (zsh)", "zsh", "bash"]);
+  const [box, menu] = [await shell.boundingBox(), await page.getByRole("menu").boundingBox()];
+  expect(Math.abs(menu.x - box.x), "the menu opens under its field").toBeLessThan(1);
   await expect(items.nth(0)).toHaveAttribute("aria-checked", "true");
-  expect(await srcs(items.nth(2))).toEqual([png("ba"), png("te")]);
+  expect(await srcs(items.nth(2))).toEqual([png("ba")]);
   await items.nth(2).click();
-  await expect.poll(() => calls).toEqual([{ method: "PATCH", path: "/api/openers", body: { preferred: "bash:terminal" } }]);
-  await expect(picker).toHaveText("bash · Terminal ▾");
-  expect(await srcs(picker)).toEqual([png("ba"), png("te")]);
-  await picker.click();
+  await expect.poll(() => calls).toEqual([{ method: "PATCH", path: "/api/openers", body: { shell: "bash" } }]);
+  await expect(shell).toHaveText("bash ▾");
+  expect(await srcs(shell)).toEqual([png("ba")]);
+  await app.click();
+  await expect(page.getByRole("menuitemradio")).toHaveText(["System default (Terminal)", "Terminal", "herdr"]);
+  await page.getByRole("menuitemradio", { name: "herdr" }).click();
+  await expect.poll(() => calls.at(-1)).toEqual({ method: "PATCH", path: "/api/openers", body: { app: "herdr" } });
+  await expect(app).toHaveText("herdr ▾");
+  await expect(shell, "the shell stays").toHaveText("bash ▾");
+  await shell.click();
   await expect(page.getByRole("menuitemradio").nth(2)).toHaveAttribute("aria-checked", "true");
   await page.getByRole("menuitemradio").nth(0).click();
-  await expect.poll(() => calls.at(-1)).toEqual({ method: "PATCH", path: "/api/openers", body: { preferred: "" } });
-  await expect(picker).toHaveText("System default (zsh · Terminal) ▾");
+  await expect.poll(() => calls.at(-1)).toEqual({ method: "PATCH", path: "/api/openers", body: { shell: "" } });
+  await expect(shell).toHaveText("System default (zsh) ▾");
 });
 
-test("Resume follows the default set in Settings", async ({ page }) => {
+test("the shells listed are the ones the chosen terminal takes", async ({ page }) => {
+  await standIn(page, { extra: { openers: [{ id: "zsh:terminal", shell: "zsh", app: "terminal" }, { id: "bash:terminal", shell: "bash", app: "terminal" },
+    { id: "zsh:herdr", shell: "zsh", app: "herdr" }] } });
+  page = await srv.open(page);
+  await page.locator("#settingsBtn").click();
+  await page.locator("#appPicker").click();
+  await page.getByRole("menuitemradio", { name: "herdr" }).click();
+  await expect(page.locator("#appPicker")).toHaveText("herdr ▾");
+  await page.locator("#shellPicker").click();
+  await expect(page.getByRole("menuitemradio")).toHaveText(["System default (zsh)", "zsh"]);
+});
+
+test("Resume follows the terminal and shell set in Settings", async ({ page }) => {
   await standIn(page);
   page = await srv.open(page);
   await page.locator("#settingsBtn").click();
-  await page.locator("#openerPicker").click();
-  await page.getByRole("menuitemradio", { name: "zsh · herdr" }).click();
-  await expect(page.locator("#openerPicker")).toHaveText("zsh · herdr ▾");
+  await page.locator("#appPicker").click();
+  await page.getByRole("menuitemradio", { name: "herdr" }).click();
+  await expect(page.locator("#appPicker")).toHaveText("herdr ▾");
   await page.locator("#settingsBtn").click();
   const d = await detail(page, "Rate limiter");
   await expect(d.locator("#resumeBtn")).toHaveAttribute("title", "zsh · herdr");

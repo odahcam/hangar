@@ -148,11 +148,19 @@ textarea { width: 100%; box-sizing: border-box; font: 13px var(--sans); color: v
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .btn[aria-busy=true]::before { animation: none; } }
 /* Resume split in two: the default opener, and a menu of the others (shell · app, each with its icons). */
-.split { display: inline-flex; position: relative; }
-.split > .btn:first-child { border-radius: 6px 0 0 6px; }
-.split > .btn.more { border-radius: 0 6px 6px 0; border-left-color: color-mix(in srgb, var(--surface) 35%, transparent); padding: 4px 6px; }
-.pickwrap { position: relative; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
-.pickwrap .menu { left: 0; right: auto; }
+.splitbtn { display: inline-flex; align-items: stretch; position: relative; }
+.splitbtn > .btn { display: inline-flex; align-items: center; margin: 0; }
+.splitbtn > .btn:first-child { border-radius: 6px 0 0 6px; }
+.splitbtn > .btn.more { border-radius: 0 6px 6px 0; border-left: 1px solid color-mix(in srgb, var(--surface) 40%, var(--accent)); padding-left: 8px; padding-right: 8px; }
+.splitbtn > .btn.more::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg); }
+.splitbtn > .btn.more[aria-expanded=true]::before { transform: translateY(2px) rotate(225deg); }
+.splitbtn .menu { left: 0; right: auto; }
+.pickwrap { position: relative; display: flex; align-items: center; gap: 8px; font-size: 12px; margin-top: 6px; }
+.pickwrap > span:first-child { min-width: 64px; color: var(--muted); }
+.pickhint { margin: 2px 0 4px 72px; color: var(--muted); font-size: 11px; }
+.pickanchor { position: relative; }
+.pickanchor .menu { left: 0; right: auto; }
 .ico { width: 16px; height: 16px; vertical-align: -3px; margin-right: 4px; }
 .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 220px; background: var(--surface); border: 1px solid var(--line);
   border-radius: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / .15); padding: 4px; display: flex; flex-direction: column; }
@@ -343,9 +351,12 @@ function openMenu(anchor, items, onPick, checked) {
     else if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); bs[(i + (e.key === "ArrowDown" ? 1 : bs.length - 1)) % bs.length]?.focus(); }
   };
   // Focus leaving the menu (Tab, a shortcut) closes it, so nothing waits on it unseen.
-  // (Not while the menu is being taken away: that focus loss is its own.)
+  // Only focus that went somewhere: WebKit (the macOS app) doesn't focus a button it clicks, so a click on an item
+  // loses focus to nothing first, and a click elsewhere is the document's to close. (Nor while the menu is being taken
+  // away: that focus loss is its own.)
   menu.addEventListener("focusout", (e) => {
-    if (!menusClosing && menu.isConnected && !menu.contains(e.relatedTarget) && e.relatedTarget !== anchor) closeMenus();
+    const to = e.relatedTarget;
+    if (!menusClosing && menu.isConnected && to && !menu.contains(to) && to !== anchor) closeMenus();
   });
   anchor.setAttribute("aria-expanded", "true");
   anchor.parentElement.append(menu);
@@ -635,7 +646,7 @@ function settlingBtn(b, s, open) {
 }
 function resumeBtn(s) {
   const b = resumeBtnOf(s);
-  return b.classList.contains("split") ? b : settlingBtn(b, s, true);
+  return b.classList.contains("splitbtn") ? b : settlingBtn(b, s, true);
 }
 function resumeBtnOf(s) {
   if (machine) {
@@ -649,13 +660,13 @@ function resumeBtnOf(s) {
   // Split: the default opener (its icons, its name on hover), and the others in a menu.
   const main = el("button", { class: "btn primary", id: "resumeBtn", title: openerName(def) }, [...openerIcons(def), t("resume")]);
   main.onclick = () => resume();
-  const more = el("button", { class: "btn primary more", id: "resumeMore", "aria-haspopup": "menu", "aria-expanded": "false", "aria-label": t("resumeWith"), text: "▾" });
+  const more = el("button", { class: "btn primary more", id: "resumeMore", "aria-haspopup": "menu", "aria-expanded": "false", "aria-label": t("resumeWith") });
   more.onclick = (e) => {
     e.stopPropagation();
     if (more.getAttribute("aria-expanded") === "true") return closeMenus();
     openMenu(more, openers.openers.filter((o) => o.id !== def.id).map((o) => ({ id: o.id, kids: [...openerIcons(o), openerName(o)] })), resume);
   };
-  const split = el("div", { class: "split" }, [main, more]);
+  const split = el("div", { class: "splitbtn" }, [main, more]);
   // While it settles, the main half says so and both wait.
   if (settling.get(s.id)) { more.disabled = true; settlingBtn(main, s, true); }
   return split;
@@ -1089,23 +1100,38 @@ function classifierSettings() {
 }
 
 // Where Resume opens sessions by default: the system's pair, or one set here (shell · app, with their icons).
+// Two fields: the shell and the terminal, each the system's or one set here, with its icon. The shells listed are the
+// ones the chosen terminal takes.
 function openersSettings() {
   if (!openers?.openers.length) return null;
-  const sys = openerOf(openers.system);
-  const choice = (id) => {
-    const o = id ? openerOf(id) : sys;
-    return o ? [...openerIcons(o), id ? openerName(o) : t("systemDefault", { name: openerName(o) })] : [t("systemDefault", { name: "—" })];
+  const [sysShell, sysApp] = (openers.system || ":").split(":");
+  const def = openerOf(openers.default);
+  const field = (kind, label, ids, sys, current) => {
+    const names = kind === "shell" ? openers.shells : openers.apps;
+    const choice = (id) => {
+      const k = id || sys, n = names[k];
+      return n ? [icon(n.icon), id ? n.name : t("systemDefault", { name: n.name })] : [t("systemDefault", { name: "—" })];
+    };
+    const value = ids.includes(current) ? current : "";
+    const picker = el("button", { class: "btn picker", id: kind === "shell" ? "shellPicker" : "appPicker", "aria-haspopup": "menu", "aria-expanded": "false", "aria-label": label },
+      [...choice(value), " ▾"]);
+    picker.onclick = (e) => {
+      e.stopPropagation();
+      if (picker.getAttribute("aria-expanded") === "true") return closeMenus();
+      openMenu(picker, [{ id: "", kids: choice("") }, ...ids.map((id) => ({ id, kids: choice(id) }))],
+        (id) => act(() => api("PATCH", "/api/openers", { [kind]: id }).then(loadOpeners), null, picker), value);
+    };
+    return el("div", { class: "pickwrap" }, [el("span", { text: label }), el("div", { class: "pickanchor" }, [picker])]);
   };
-  const picker = el("button", { class: "btn picker", id: "openerPicker", "aria-haspopup": "menu", "aria-expanded": "false", "aria-label": t("openWith") },
-    [...choice(openerOf(openers.preferred) ? openers.preferred : ""), " ▾"]);
-  picker.onclick = (e) => {
-    e.stopPropagation();
-    if (picker.getAttribute("aria-expanded") === "true") return closeMenus();
-    openMenu(picker, [{ id: "", kids: choice("") }, ...openers.openers.map((o) => ({ id: o.id, kids: choice(o.id) }))],
-      (id) => act(() => api("PATCH", "/api/openers", { preferred: id }).then(loadOpeners), null, picker),
-      openerOf(openers.preferred) ? openers.preferred : "");
-  };
-  return panel(t("pOpeners"), t("pOpenersSub"), [el("div", { class: "pickwrap" }, [el("span", { text: t("openWith") }), picker])]);
+  const apps = [...new Set(openers.openers.map((o) => o.app))];
+  const app = def?.app ?? sysApp;
+  const shells = [...new Set(openers.openers.filter((o) => o.app === app).map((o) => o.shell))];
+  return panel(t("pOpeners"), t("pOpenersSub"), [
+    field("app", t("terminalApp"), apps, sysApp, openers.preferred?.app),
+    el("div", { class: "meta pickhint", text: t("terminalHint") }),
+    field("shell", t("shell"), shells, sysShell, openers.preferred?.shell),
+    el("div", { class: "meta pickhint", text: t("shellHint") }),
+  ]);
 }
 
 // herdr: the integration on or off, restoring on its own or only when asked, and the hc to call.
