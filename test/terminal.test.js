@@ -187,9 +187,10 @@ test("on Windows a live session is live, with no tab to focus", { skip: !WIN32 }
   assert.deepEqual((await srv.session(s.id)).live, { pid: child.pid, canFocus: false });
 });
 
-// The tab runs the helper itself, no shell, so Windows Terminal opens the user's default profile; the helper sets the
-// account (see its own test below). wt gets neither what would make claude a Claude Code session's child nor the
-// look of the terminal Hangar was started from (an agent's NO_COLOR left sessions colorless).
+// By default the tab runs the helper in Windows PowerShell (the shell of the default profile, see openers.test.js),
+// which stays once claude exits; the helper sets the account (see its own test below). wt gets neither what would
+// make claude a Claude Code session's child nor the look of the terminal Hangar was started from (an agent's NO_COLOR
+// left sessions colorless).
 test("on Windows resuming a closed session opens a Windows Terminal tab running the resume helper in its cwd", { skip: !WIN32 }, async () => {
   const s = addSession(w, { cwd: String.raw`C:\work\a;b`, turns: [{ user: "a" }] });
   srv = await startServer(w, { CLAUDECODE: "1", CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CODE_SESSION_ID: "parent",
@@ -197,8 +198,8 @@ test("on Windows resuming a closed session opens a Windows Terminal tab running 
   const r = await srv.api("POST", `/api/resume/${s.id}`);
   assert.deepEqual(r.json, { opened: true });
   const [call] = calls(w, "wt");
-  assert.deepEqual(call.args, ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`,
-    RESUME.replaceAll(";", "\\;"), s.id, "--config", w.claude.replaceAll(";", "\\;")]);
+  assert.deepEqual(call.args.slice(0, 5), ["-w", "0", "new-tab", "--startingDirectory", String.raw`C:\work\a\;b`]);
+  assert.deepEqual(call.args.slice(-1), [`Set-Location -LiteralPath 'C:\\work\\a\\;b'\\; & '${RESUME}' '${s.id}' '--config' '${w.claude}'`]);
   assert.deepEqual(call.terminalEnv, []);
   assert.ok(resumed(w, s.id));
 });
@@ -217,14 +218,15 @@ test("on Windows the tab opens under Windows Terminal's default profile", { skip
     ["-w", "0", "new-tab", "-p", "{574e775e-4f2a-5b96-ac1e-a2962a402336}", "--startingDirectory", String.raw`C:\work\p`]);
 });
 
-// No shell parses the account folder any more: quotes of any kind reach the helper as they are.
+// PowerShell quoting holds the account folder: ' and the typographic quotes it also takes for one are doubled.
 test("on Windows an account folder with quotes reaches the helper as one argument", { skip: !WIN32 }, async () => {
   // (A double quote can't be in a Windows file name.)
   const dir = addAccount(w, "claude-it's \u2018a\u2019 & %b%");
   const s = addSession(w, { claude: dir, cwd: String.raw`C:\work\q`, turns: [{ user: "a" }] });
   srv = await startServer(w);
   assert.deepEqual((await srv.api("POST", `/api/resume/${s.id}`)).json, { opened: true });
-  assert.deepEqual(calls(w, "wt")[0].args.slice(-2), ["--config", dir]);
+  const quoted = "'" + dir.replace(/['\u2018\u2019]/g, (c) => c + c) + "'";
+  assert.ok(calls(w, "wt")[0].args.at(-1).endsWith(`'--config' ${quoted}`), calls(w, "wt")[0].args.at(-1));
 });
 
 // What every tab runs: claude --resume under the account, without what makes it a Claude Code session's child.

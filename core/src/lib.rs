@@ -11,6 +11,7 @@ pub mod cloud;
 mod db;
 mod herdr;
 mod insights;
+mod open;
 pub mod platform;
 mod proc;
 mod remote;
@@ -329,6 +330,8 @@ impl Hangar {
             ("POST", "close-idle-tabs") => return Ok(self.close_idle_tabs()),
             ("GET", "herdr") => return Ok(self.herdr_status()),
             ("PATCH", "herdr") => return self.set_herdr(&parse()?),
+            ("GET", "openers") => return Ok(self.openers_status()),
+            ("PATCH", "openers") => return self.set_opener(&parse()?),
             ("POST", "restore-herdr") => return self.herdr_restore_all(),
             ("POST", "classify") => return Ok(self.run_now()),
             ("GET", "classifier") => return Ok(self.classifier_schedule()),
@@ -363,7 +366,7 @@ impl Hangar {
                 db::dismiss_v(&self.db(), id)?;
                 Ok(json!({ "ok": true }))
             }
-            ("POST", "resume") => self.resume(id),
+            ("POST", "resume") => self.resume(id, &parse()?),
             ("POST", "close") => self.close(id),
             ("POST", "transfer") => self.transfer(id, &parse()?),
             _ => Err(not_found()),

@@ -52,6 +52,32 @@ static LOGIN_SHELL: LazyLock<String> = LazyLock::new(|| {
     })
 });
 
+pub(crate) fn login_shell() -> String {
+    LOGIN_SHELL.clone()
+}
+
+// Overridable so tests can stand in for the apps it opens.
+static OPEN: LazyLock<String> = LazyLock::new(|| std::env::var("HANGAR_OPEN").unwrap_or_else(|_| "open".into()));
+
+pub(crate) fn open_bin() -> String {
+    OPEN.clone()
+}
+
+/// A new Terminal window typing `line` into the login shell.
+pub(crate) fn terminal_type(line: &str) -> Result<(), String> {
+    osascript(&format!("tell application \"Terminal\"\ndo script {}\nactivate\nend tell", as_string(line)));
+    Ok(())
+}
+
+/// A new iTerm2 window typing `line` into the login shell.
+pub(crate) fn iterm_type(line: &str) -> Result<(), String> {
+    osascript(&format!(
+        "tell application \"iTerm\"\nset w to (create window with default profile)\ntell current session of w to write text {}\nactivate\nend tell",
+        as_string(line)
+    ));
+    Ok(())
+}
+
 fn posix_typable(s: &str) -> bool {
     let shell = Path::new(LOGIN_SHELL.as_str()).file_name().and_then(OsStr::to_str).unwrap_or("");
     matches!(shell, "zsh" | "bash" | "sh" | "ksh" | "dash") || !s.contains(['\'', '\\', '!'])

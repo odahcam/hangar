@@ -131,22 +131,11 @@ fn shell_line(shell: &str, cwd: &str, argv: &[String]) -> Option<String> {
     let name = shell.rsplit(['/', '\\']).next().unwrap_or(shell).trim_start_matches('-').trim_end_matches(".exe").to_ascii_lowercase();
     match name.as_str() {
         "zsh" | "bash" | "sh" | "dash" | "ksh" => {
-            let q = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+            let q = crate::open::posix_quote;
             Some(format!("cd {} && {}", q(cwd), argv.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")))
         }
         "pwsh" | "powershell" => {
-            // PowerShell takes the typographic single quotes (U+2018..U+201B) for ' too: each one is doubled the same way.
-            let q = |s: &str| {
-                let mut o = String::from("'");
-                for c in s.chars() {
-                    if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
-                        o.push(c);
-                    }
-                    o.push(c);
-                }
-                o.push('\'');
-                o
-            };
+            let q = crate::open::pwsh_quote;
             Some(format!("Set-Location -LiteralPath {}; & {}", q(cwd), argv.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")))
         }
         _ => None,
@@ -255,6 +244,80 @@ impl Hangar {
         }
         let o = run(bin, &["send", &t.addr, &line], Duration::from_secs(90));
         if o.ok { Ok(()) } else { Err(o.err.trim().to_string()) }
+    }
+
+    /// herdr is an opener: the integration is on and hc is there.
+    pub(crate) fn herdr_available(&self) -> bool {
+        self.hc().is_some_and(|b| json_of(&b, &["ls", "--json"]).is_some())
+    }
+
+    /// herdr's window app: HANGAR_HERDR_APP (empty: none), else where it installs itself, else the PATH.
+    fn herdr_app(&self) -> Option<String> {
+        if let Some(v) = std::env::var_os("HANGAR_HERDR_APP") {
+            return Some(v.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+        }
+        if !self.discover {
+            return None;
+        }
+        let exe = if cfg!(windows) { "herdr-app.exe" } else { "herdr-app" };
+        let installed = crate::home().join(".local/bin").join(exe);
+        Some(if installed.exists() { installed.to_string_lossy().into_owned() } else { exe.into() })
+    }
+
+    /// The executable whose icon herdr shows (a scoop shim points at it in its .shim file).
+    #[cfg(windows)]
+    pub(crate) fn herdr_app_icon(&self) -> String {
+        let Some(bin) = self.herdr_app() else { return String::new() };
+        let found = if std::path::Path::new(&bin).is_absolute() {
+            Some(std::path::PathBuf::from(&bin))
+        } else {
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join(&bin)).find(|p| p.is_file())
+        };
+        let Some(exe) = found else { return String::new() };
+        let shim = std::fs::read_to_string(exe.with_extension("shim")).ok();
+        let target = shim.as_deref().and_then(|s| s.lines().find_map(|l| l.trim().strip_prefix("path")?.trim().strip_prefix('=')))
+            .map(|p| p.trim().trim_matches('"').to_string());
+        target.unwrap_or_else(|| exe.to_string_lossy().into_owned())
+    }
+
+    /// Brings herdr's window forward (macOS: the app, by bundle).
+    fn herdr_front(&self) {
+        #[cfg(target_os = "macos")]
+        if self.discover {
+            let _ = proc::run(&crate::platform::macos::open_bin(), &["-b", "dev.herdr.app"], HC_WAIT);
+        }
+    }
+
+    /// A new herdr tab running `argv` in `cwd`: through the window app, else as a kept terminal of hc's own.
+    pub(crate) fn herdr_open(&self, cwd: &str, argv: &[String]) -> Result<(), String> {
+        if let Some(app) = self.herdr_app() {
+            let o = run(&app, &["do", "terminal.open", "--argv", &Value::from(argv.to_vec()).to_string(), "--folder", cwd], HC_WAIT);
+            if o.ok {
+                self.herdr_front();
+                return Ok(());
+            }
+            if !o.missing {
+                return Err(o.err.trim().to_string());
+            }
+        }
+        let bin = self.hc().ok_or("no_hc")?;
+        let mut args = vec!["run", "--bg", "--keep", "--no-parent", "--cwd", cwd, "--"];
+        args.extend(argv.iter().map(String::as_str));
+        let o = run(&bin, &args, HC_WAIT);
+        if o.ok { Ok(()) } else { Err(o.err.trim().to_string()) }
+    }
+
+    /// The herdr terminal session `id` is running in, shown; None when it runs in none.
+    pub(crate) fn herdr_focus(&self, id: &str) -> Option<ApiResult> {
+        let bin = self.hc()?;
+        let t = terminals(&bin)?.into_iter().find(|t| t.noted_session() == Some(id) && t.label(PID) == Some(&t.pid.to_string()))?;
+        let app = self.herdr_app()?;
+        let o = run(&app, &["do", "agent.focus", "--terminal", &t.addr], HC_WAIT);
+        if !o.ok {
+            return Some(Err(ApiError(500, o.err.trim().to_string())));
+        }
+        self.herdr_front();
+        Some(Ok(json!({ "focused": t.addr })))
     }
 
     /// The recovered terminal noted for session `id`, restored; None when there is none.

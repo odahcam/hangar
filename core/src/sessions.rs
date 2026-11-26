@@ -203,12 +203,25 @@ impl Hangar {
         json!({ "closed": idle.len() })
     }
 
-    pub(crate) fn resume(&self, id: &str) -> ApiResult {
+    /// POST /api/resume/<id> { opener? }: a running session's terminal brought forward; else the session opened, with
+    /// the opener asked for (open.rs), or back in the herdr terminal that lost it, or with the default opener.
+    pub(crate) fn resume(&self, id: &str, body: &Value) -> ApiResult {
         db::get_t(&self.db(), id)?.ok_or_else(|| ApiError(404, "unknown_session".into()))?;
+        let opener = match &body["opener"] {
+            Value::Null => None,
+            Value::String(s) => Some(s.as_str()),
+            _ => return Err(ApiError(400, "opener".into())),
+        };
         let live = self.live_sessions().remove(id);
         if let Some(tty) = live.as_ref().and_then(|l| l.tty.as_ref()) {
             if self.platform.focus(tty) {
                 return Ok(json!({ "focused": tty }));
+            }
+        }
+        // Running in a herdr terminal: that one is shown (a terminal app's tab list doesn't have it).
+        if live.is_some() {
+            if let Some(r) = self.herdr_focus(id) {
+                return r;
             }
         }
         // Resuming a session that is still running elsewhere would fork it; only a tab we can't find any more is reopened,
@@ -217,14 +230,15 @@ impl Hangar {
         if live.is_some() && !(caps.focus && caps.tabs) {
             return Err(ApiError(409, "already_open".into()));
         }
-        // A herdr terminal that lost this session to a restart gets it back in place, in its own pane.
-        if live.is_none() {
+        // A herdr terminal that lost this session to a restart gets it back in place, in its own pane, unless another
+        // opener was asked for.
+        if live.is_none() && opener.is_none() {
             if let Some(r) = self.herdr_resume(id) {
                 return r;
             }
         }
         let (cwd, argv) = self.resume_line(id)?;
-        self.platform.open(&cwd, &argv).map_err(|e| ApiError(500, e))?;
+        self.open_with(opener, &cwd, &argv)?;
         Ok(json!({ "opened": true }))
     }
 
