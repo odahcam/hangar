@@ -7,7 +7,6 @@ use hangar_core::{Config, Hangar};
 use std::sync::Arc;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,9 +82,27 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, CheckMenuItem<Wry>)>
     Ok((menu, login))
 }
 
+/// The login item, the person's own: a LaunchAgent on macOS, HKCU's Run key on Windows (never HKLM's, which an
+/// elevated app would otherwise get, starting Hangar for every user of the machine).
+fn launcher(app: &AppHandle) -> Option<auto_launch::AutoLaunch> {
+    let exe = std::env::current_exe().ok()?;
+    #[cfg(target_os = "macos")]
+    let exe = exe.canonicalize().ok()?;
+    let mut b = auto_launch::AutoLaunchBuilder::new();
+    b.set_app_name(&app.package_info().name).set_app_path(&exe.display().to_string()).set_args(&[HIDDEN]);
+    #[cfg(target_os = "macos")]
+    b.set_macos_launch_mode(auto_launch::MacOSLaunchMode::LaunchAgent);
+    #[cfg(windows)]
+    b.set_windows_enable_mode(auto_launch::WindowsEnableMode::CurrentUser);
+    b.build().map_err(|e| eprintln!("open at login: {e}")).ok()
+}
+
+fn login_enabled(app: &AppHandle) -> bool {
+    launcher(app).is_some_and(|l| l.is_enabled().unwrap_or(false))
+}
+
 fn refresh_login_item(app: &AppHandle) {
-    let enabled = app.autolaunch().is_enabled().unwrap_or(false);
-    let _ = app.state::<LoginItem>().0.set_checked(enabled);
+    let _ = app.state::<LoginItem>().0.set_checked(login_enabled(app));
 }
 
 /// A test instance leaves the login item alone (it would point it at the test build), unless a spec is about it.
@@ -95,8 +112,8 @@ fn toggle_login_item(app: &AppHandle) {
     if !LOGIN_ITEM.load(Ordering::SeqCst) {
         return;
     }
-    let launcher = app.autolaunch();
-    let result = if launcher.is_enabled().unwrap_or(false) { launcher.disable() } else { launcher.enable() };
+    let Some(l) = launcher(app) else { return };
+    let result = if l.is_enabled().unwrap_or(false) { l.disable() } else { l.enable() };
     if let Err(e) = result {
         eprintln!("open at login: {e}");
     }
@@ -223,7 +240,6 @@ fn main() {
         app = app.plugin(state.build());
     }
     app
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![HIDDEN])))
         .manage(hangar)
         .invoke_handler(handlers)
         .on_menu_event(|app, event| on_menu(app, event.id().as_ref()))
@@ -266,9 +282,8 @@ fn main() {
             app.manage(LoginItem(login));
             refresh_login_item(&handle);
             // A login item written before it passed HIDDEN is written again, with it.
-            let launcher = handle.autolaunch();
-            if login_item && launcher.is_enabled().unwrap_or(false) {
-                let _ = launcher.enable();
+            if let Some(l) = launcher(&handle).filter(|l| login_item && l.is_enabled().unwrap_or(false)) {
+                let _ = l.enable();
             }
             #[cfg(windows)]
             if !test_instance {
