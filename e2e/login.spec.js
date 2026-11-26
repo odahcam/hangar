@@ -90,7 +90,9 @@ test.describe("the login item", () => {
   test("Open at Login starts Hangar with --hidden, and turned off it doesn't start it", async () => {
     app = await start([], { HANGAR_E2E_LOGIN: "1" });
     await app.menu("login");
-    await waitFor(() => ours());
+    await waitFor(() => ours()).catch(() => {
+      throw new Error(`no Run value names ${APP}: ${JSON.stringify(runValues())}\n${fs.readFileSync(path.join(w.root, "app.log"), "utf8").slice(-1000)}`);
+    });
     expect(ours().data).toMatch(/--hidden/);
     await app.menu("login");
     await waitFor(() => !ours());
