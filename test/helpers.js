@@ -122,7 +122,7 @@ function calls(w, bin) {
 // Whether this OS's terminal was asked to run the resume helper for session `id`.
 function resumed(w, id) {
   return calls(w).some((c) => c.bin === "osascript" ? c.script.includes("do script") && c.script.includes(`hangar-resume' '${id}'`)
-    : c.bin === "wt" && c.args.some((a) => /hangar-resume(\.exe)?$/.test(a)) && c.args.includes(id));
+    : c.bin === "wt" && /hangar-resume(\.exe)?'? /.test(c.args.join(" ")) && c.args.join(" ").includes(id));
 }
 
 async function startServer(w, env = {}) {
@@ -135,6 +135,10 @@ async function startServer(w, env = {}) {
       HANGAR_WEB_DIR: path.join(ROOT, "web"),
       HANGAR_OSASCRIPT: path.join(BIN, "osascript.js"),
       HANGAR_WT: path.join(BIN, "wt.js"),
+      HANGAR_OPEN: path.join(BIN, "open.js"),
+      HANGAR_CONSOLE: path.join(BIN, "console.js"),
+      // The terminal apps found (macOS bundles): the world's, not the machine's.
+      HANGAR_APPS_DIR: path.join(w.root, "apps"),
       // Where Windows Terminal's settings are looked up: the world's, not the machine's.
       LOCALAPPDATA: path.join(w.root, "local"),
       CLAUDE_BIN: path.join(BIN, "claude.js"),

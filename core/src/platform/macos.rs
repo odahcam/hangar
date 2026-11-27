@@ -52,6 +52,71 @@ static LOGIN_SHELL: LazyLock<String> = LazyLock::new(|| {
     })
 });
 
+pub(crate) fn login_shell() -> String {
+    LOGIN_SHELL.clone()
+}
+
+// Overridable so tests can stand in for the apps it opens.
+static OPEN: LazyLock<String> = LazyLock::new(|| std::env::var("HANGAR_OPEN").unwrap_or_else(|_| "open".into()));
+
+pub(crate) fn open_bin() -> String {
+    OPEN.clone()
+}
+
+/// A new Terminal window typing `line` into the login shell.
+pub(crate) fn terminal_type(line: &str) -> Result<(), String> {
+    osascript_ok(&format!("tell application \"Terminal\"\ndo script {}\nactivate\nend tell", as_string(line)))
+}
+
+/// A new iTerm2 window typing `line` into the login shell.
+pub(crate) fn iterm_type(line: &str) -> Result<(), String> {
+    osascript_ok(&format!(
+        "tell application \"iTerm\"\nset w to (create window with default profile)\ntell current session of w to write text {}\nactivate\nend tell",
+        as_string(line)
+    ))
+}
+
+/// Brings forward the iTerm2 session on `tty`, if iTerm2 runs and has it (asking a stopped iTerm2 would start it).
+pub(crate) fn iterm_focus(tty: &str) -> bool {
+    let script = format!(
+        "if application \"iTerm\" is running then\ntell application \"iTerm\"\nrepeat with w in windows\nrepeat with t in tabs of w\nrepeat with s in sessions of t\nif tty of s is {} then\nselect w\nselect t\nselect s\nactivate\nreturn \"ok\"\nend if\nend repeat\nend repeat\nend repeat\nend tell\nend if\nreturn \"missing\"",
+        as_string(&format!("/dev/{tty}"))
+    );
+    osascript(&script).trim() == "ok"
+}
+
+/// Brings an app forward by its bundle.
+pub(crate) fn activate(bundle: &str) -> bool {
+    run(&OPEN, &["-a", bundle], T).ok
+}
+
+/// The terminal app `pid` runs under: the first of its ancestors that is one ("terminal", "iterm", "ghostty",
+/// "wezterm", "herdr"); None under none of them.
+pub(crate) fn host_app(pid: u32) -> Option<&'static str> {
+    const APPS: [(&str, &str); 5] = [("/Terminal.app/", "terminal"), ("/iTerm.app/", "iterm"), ("/Ghostty.app/", "ghostty"), ("/WezTerm.app/", "wezterm"), ("herdr", "herdr")];
+    let parents: HashMap<u32, u32> = crate::proc::parents().into_iter().collect();
+    let mut chain = vec![];
+    let mut p = pid;
+    while let Some(&q) = parents.get(&p).filter(|&&q| q != p && q > 1 && chain.len() < 64) {
+        chain.push(q);
+        p = q;
+    }
+    if chain.is_empty() {
+        return None;
+    }
+    let list = chain.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let comm: HashMap<u32, String> = run("ps", &["-o", "pid=,comm=", "-p", &list], T)
+        .out
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let (pid, comm) = l.split_once(' ')?;
+            Some((pid.parse().ok()?, comm.trim().to_string()))
+        })
+        .collect();
+    chain.iter().find_map(|p| APPS.iter().find(|(pat, _)| comm.get(p).is_some_and(|c| c.contains(pat))).map(|(_, id)| *id))
+}
+
 fn posix_typable(s: &str) -> bool {
     let shell = Path::new(LOGIN_SHELL.as_str()).file_name().and_then(OsStr::to_str).unwrap_or("");
     matches!(shell, "zsh" | "bash" | "sh" | "ksh" | "dash") || !s.contains(['\'', '\\', '!'])
@@ -66,6 +131,12 @@ fn tab_script(tty: &str, body: &str) -> String {
 
 fn osascript(script: &str) -> String {
     run(&OSASCRIPT, &["-e", script], T).out
+}
+
+/// osascript for an action: its error when it fails (an app not allowed to be driven, say).
+fn osascript_ok(script: &str) -> Result<(), String> {
+    let o = run(&OSASCRIPT, &["-e", script], T);
+    if o.ok { Ok(()) } else { Err(Some(o.err.trim().to_string()).filter(|e| !e.is_empty()).unwrap_or_else(|| "osascript failed".into())) }
 }
 
 impl Platform for MacOs {

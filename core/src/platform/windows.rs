@@ -96,17 +96,117 @@ impl Platform for Windows {
     }
 }
 
+/// A new tab in the most recent Windows Terminal window, under the default profile (see `open`), running `line` (a
+/// shell's, see open.rs) as its command line; without Windows Terminal, a console window.
+pub(crate) fn wt_tab(cwd: &str, line: &[crate::open::Arg]) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let mut wt = command(&WT);
+    for k in TERMINAL_ENV {
+        wt.env_remove(k);
+    }
+    wt.args(["-w", "0", "new-tab"]);
+    if let Some(p) = default_profile() {
+        wt.args(["-p", &p.replace(';', "\\;")]);
+    }
+    wt.args(["--startingDirectory", &cwd.replace(';', "\\;")]);
+    wt.raw_arg(crate::open::win_cmdline(line).replace(';', "\\;"));
+    if run_with(&mut wt, None, Duration::from_secs(8)).missing {
+        return console(cwd, line);
+    }
+    Ok(())
+}
+
+/// A console window of its own running `line`.
+pub(crate) fn console(cwd: &str, line: &[crate::open::Arg]) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_CONSOLE: u32 = 0x10;
+    let (bin, rest) = line.split_first().ok_or("no command")?;
+    // Tests stand in for the console window: given the program and the command line it would get.
+    if let Ok(fake) = std::env::var("HANGAR_CONSOLE") {
+        let r = run_with(command(&fake).args([bin.text(), &crate::open::win_cmdline(rest), cwd]), None, Duration::from_secs(8));
+        return if r.ok { Ok(()) } else { Err(r.err) };
+    }
+    let mut c = command(bin.text());
+    for k in TERMINAL_ENV {
+        c.env_remove(k);
+    }
+    c.raw_arg(crate::open::win_cmdline(rest)).current_dir(cwd).creation_flags(CREATE_NEW_CONSOLE).spawn().map(drop).map_err(|e| e.to_string())
+}
+
+/// JSON with comments (// and /* */) and trailing commas, as Windows Terminal takes it, made plain JSON.
+pub(crate) fn strict_json(text: &str) -> String {
+    // Comments first (outside strings), then commas whose next non-blank is } or ].
+    let c: Vec<char> = text.chars().collect();
+    let (mut bare, mut i, mut in_str) = (Vec::with_capacity(c.len()), 0, false);
+    while i < c.len() {
+        match (in_str, c[i], c.get(i + 1)) {
+            (true, '\\', Some(&n)) => {
+                bare.extend([c[i], n]);
+                i += 2;
+                continue;
+            }
+            (true, '"', _) | (false, '"', _) => in_str = !in_str,
+            (false, '/', Some('/')) => {
+                while i < c.len() && c[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            (false, '/', Some('*')) => {
+                i += 2;
+                while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+            _ => {}
+        }
+        bare.push(c[i]);
+        i += 1;
+    }
+    let mut out = String::with_capacity(bare.len());
+    let (mut in_str, mut esc) = (false, false);
+    for (j, &ch) in bare.iter().enumerate() {
+        if esc {
+            esc = false;
+        } else if in_str && ch == '\\' {
+            esc = true;
+        } else if ch == '"' {
+            in_str = !in_str;
+        }
+        if !in_str && ch == ',' && matches!(bare[j + 1..].iter().find(|c| !c.is_whitespace()), Some('}' | ']')) {
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn settings_text() -> Option<String> {
+    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    [
+        local.join(r"Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"),
+        local.join(r"Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json"),
+        local.join(r"Microsoft\Windows Terminal\settings.json"),
+    ]
+    .iter()
+    .find_map(|f| std::fs::read_to_string(f).ok())
+}
+
+/// The name of Windows Terminal's default profile ("Windows PowerShell", "Command Prompt"...), which tells its shell.
+pub(crate) fn default_profile_name() -> Option<String> {
+    let guid = default_profile()?;
+    let v: serde_json::Value = serde_json::from_str(&strict_json(&settings_text()?)).ok()?;
+    let list = v["profiles"]["list"].as_array().or(v["profiles"].as_array())?;
+    list.iter().find(|p| p["guid"].as_str().is_some_and(|g| g.eq_ignore_ascii_case(&guid)))?["name"].as_str().map(String::from)
+}
+
 // The "defaultProfile" of Windows Terminal's settings (the Store build's, else Preview's, else the unpackaged one's).
 // The file allows comments, so the value is read as the first string after the key rather than parsed as JSON; a key
 // behind "//" on its line is a comment's.
 fn default_profile() -> Option<String> {
-    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
-    let files = [
-        local.join(r"Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"),
-        local.join(r"Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json"),
-        local.join(r"Microsoft\Windows Terminal\settings.json"),
-    ];
-    let text = files.iter().find_map(|f| std::fs::read_to_string(f).ok())?;
+    let text = settings_text()?;
     const KEY: &str = "\"defaultProfile\"";
     let at = text.match_indices(KEY).map(|(i, _)| i).find(|&i| !text[text[..i].rfind('\n').map_or(0, |n| n + 1)..i].contains("//"))?;
     let rest = &text[at + KEY.len()..];
@@ -381,5 +481,18 @@ mod win {
             }
             Some(pages * sys.page_size as u64)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strict_json;
+
+    #[test]
+    fn windows_terminal_settings_parse_with_comments_and_trailing_commas() {
+        let text = "{\n  // \"defaultProfile\": \"{x}\",\n  \"defaultProfile\": \"{y}\", /* mine */\n  \"profiles\": { \"list\": [\n    { \"name\": \"Power//Shell, \\\"7\\\"\", // the new one\n      \"guid\": \"{y}\", },\n  ], },\n}\n";
+        let v: serde_json::Value = serde_json::from_str(&strict_json(text)).expect("plain JSON");
+        assert_eq!(v["defaultProfile"], "{y}");
+        assert_eq!(v["profiles"]["list"][0]["name"], "Power//Shell, \"7\"");
     }
 }

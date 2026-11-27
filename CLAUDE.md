@@ -4,6 +4,10 @@
 
 Hangar is sold as the way to reduce the anxiety of working with many Claude Code sessions, making the work lighter and zen. Copy that presents it (the landing page in `cloud/public/`, the README) follows that direction; the landing's lead opens with "Stale session anxiety is no more."
 
+## Tests
+
+Every feature and behavior gets exhaustive e2e specs.
+
 ## CI
 
 - `.github/workflows/ci.yml` runs on pushes to `main`, on PRs and by hand; a branch without a PR runs it with

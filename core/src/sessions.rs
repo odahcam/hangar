@@ -203,12 +203,29 @@ impl Hangar {
         json!({ "closed": idle.len() })
     }
 
-    pub(crate) fn resume(&self, id: &str) -> ApiResult {
+    /// POST /api/resume/<id> { opener? }: a running session's terminal brought forward; else the session opened, with
+    /// the opener asked for (open.rs), or back in the herdr terminal that lost it, or with the default opener.
+    pub(crate) fn resume(&self, id: &str, body: &Value) -> ApiResult {
         db::get_t(&self.db(), id)?.ok_or_else(|| ApiError(404, "unknown_session".into()))?;
+        let opener = match &body["opener"] {
+            Value::Null => None,
+            Value::String(s) => Some(s.as_str()),
+            _ => return Err(ApiError(400, "opener".into())),
+        };
         let live = self.live_sessions().remove(id);
         if let Some(tty) = live.as_ref().and_then(|l| l.tty.as_ref()) {
             if self.platform.focus(tty) {
                 return Ok(json!({ "focused": tty }));
+            }
+        }
+        // Running in a herdr terminal: that one is shown (a terminal app's tab list doesn't have it).
+        if let Some(l) = live.as_ref() {
+            if let Some(r) = self.herdr_focus(id) {
+                return r;
+            }
+            // In another terminal app: shown there, or said to be open; never a second copy.
+            if let Some(r) = self.focus_in_app(l.pid, l.tty.as_deref()) {
+                return r;
             }
         }
         // Resuming a session that is still running elsewhere would fork it; only a tab we can't find any more is reopened,
@@ -217,14 +234,15 @@ impl Hangar {
         if live.is_some() && !(caps.focus && caps.tabs) {
             return Err(ApiError(409, "already_open".into()));
         }
-        // A herdr terminal that lost this session to a restart gets it back in place, in its own pane.
-        if live.is_none() {
+        // A herdr terminal that lost this session to a restart gets it back in place, in its own pane, unless another
+        // opener was asked for.
+        if live.is_none() && opener.is_none() {
             if let Some(r) = self.herdr_resume(id) {
                 return r;
             }
         }
         let (cwd, argv) = self.resume_line(id)?;
-        self.platform.open(&cwd, &argv).map_err(|e| ApiError(500, e))?;
+        self.open_with(opener, id, &cwd, &argv)?;
         Ok(json!({ "opened": true }))
     }
 
@@ -241,11 +259,16 @@ impl Hangar {
             }
             let _ = fs::copy(&saved, file);
         }
-        // A transcript with no message yet records no cwd. Opening somewhere else would have Claude Code ask to trust it.
-        let cwd = nonempty(&t.cwd)
-            .or(live.as_ref().and_then(|l| nonempty(&l.cwd)))
-            .map(String::from)
+        // claude --resume looks for the session under the project folder named after where it runs, which is where the
+        // session started: the transcript's last cwd (a session that cd'd elsewhere) would find nothing. The folder
+        // whose name is the transcript's project folder wins, else the one that folder decodes to; a transcript with
+        // no message yet records no cwd. Opening somewhere else would have Claude Code ask to trust it.
+        let slug = |p: &str| p.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+        let project = file.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("");
+        let seen: Vec<String> = [nonempty(&t.cwd), live.as_ref().and_then(|l| nonempty(&l.cwd))].into_iter().flatten().map(String::from).collect();
+        let cwd = seen.iter().find(|c| slug(c) == project).cloned()
             .or_else(|| cwd_from_project(file))
+            .or_else(|| seen.first().cloned())
             .ok_or_else(|| ApiError(409, "folder_unknown".into()))?;
         let config = config_dir(file).filter(|d| !accounts::is_default(d));
         // The cwd comes verbatim from the transcript and both paths are typed into a terminal: quoting stops the shell,

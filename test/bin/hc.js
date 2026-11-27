@@ -7,7 +7,8 @@ const terms = JSON.parse(fs.readFileSync(process.env.FAKE_HC, "utf8"));
 fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ bin: "hc", args: process.argv.slice(2), identity: "HC_TERMINAL_ID" in process.env }) + "\n");
 const t = terms.find((t) => t.address === addr);
 const view = (t) => ({ address: t.address, pid: t.pid, state: "live", labels: t.labels, foreground: { pid: t.fg, name: t.fgName ?? "zsh" } });
-if (cmd === "ls") process.stdout.write(JSON.stringify({ terminals: terms.map((t) => ({ address: t.address })) }));
+if (cmd === "run") process.stdout.write(JSON.stringify({ address: "t9" }));
+else if (cmd === "ls") process.stdout.write(JSON.stringify({ terminals: terms.map((t) => ({ address: t.address, cwd: t.cwd })) }));
 else if (!t) { process.stderr.write("not_found"); process.exit(3); }
 else if (cmd === "get") process.stdout.write(JSON.stringify(view(t)));
 else if (cmd === "label") {

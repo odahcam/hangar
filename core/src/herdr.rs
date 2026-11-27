@@ -10,6 +10,7 @@ use crate::{db, proc};
 use crate::{ApiError, ApiResult, Hangar};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -101,6 +102,17 @@ fn terminals(bin: &str) -> Option<Vec<Term>> {
     Some(addrs.filter_map(|a| term(bin, a)).collect())
 }
 
+/// Where the herdr space session `id` last ran in is kept (meta).
+fn space_key(id: &str) -> String {
+    format!("herdr_space:{id}")
+}
+
+/// What herdr-app said went wrong: it answers on stdout, as JSON ({ "error": ... }).
+fn herdr_app_error(o: &proc::Output) -> String {
+    let said = serde_json::from_str::<Value>(o.out.trim()).ok().and_then(|v| v["error"].as_str().map(String::from));
+    said.or_else(|| Some(o.err.trim().to_string()).filter(|e| !e.is_empty())).unwrap_or_else(|| format!("herdr-app: {}", o.out.trim()))
+}
+
 /// One restore at a time: the background pass, Resume and the global button would otherwise each find the same
 /// terminal recovered and type into it twice.
 static RESTORING: Mutex<()> = Mutex::new(());
@@ -131,22 +143,11 @@ fn shell_line(shell: &str, cwd: &str, argv: &[String]) -> Option<String> {
     let name = shell.rsplit(['/', '\\']).next().unwrap_or(shell).trim_start_matches('-').trim_end_matches(".exe").to_ascii_lowercase();
     match name.as_str() {
         "zsh" | "bash" | "sh" | "dash" | "ksh" => {
-            let q = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+            let q = crate::open::posix_quote;
             Some(format!("cd {} && {}", q(cwd), argv.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")))
         }
         "pwsh" | "powershell" => {
-            // PowerShell takes the typographic single quotes (U+2018..U+201B) for ' too: each one is doubled the same way.
-            let q = |s: &str| {
-                let mut o = String::from("'");
-                for c in s.chars() {
-                    if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
-                        o.push(c);
-                    }
-                    o.push(c);
-                }
-                o.push('\'');
-                o
-            };
+            let q = crate::open::pwsh_quote;
             Some(format!("Set-Location -LiteralPath {}; & {}", q(cwd), argv.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")))
         }
         _ => None,
@@ -202,6 +203,12 @@ impl Hangar {
                 if t.noted_session() != Some(id) || t.label(PID) != Some(&pid) {
                     run(&bin, &["label", &t.addr, &format!("{SESSION}={id}"), &format!("{PID}={pid}")], HC_WAIT);
                 }
+                // The space herdr shows it in, for a Resume after its terminal is gone.
+                if let Some(space) = t.label("herdr.space") {
+                    if self.herdr_meta(&space_key(id)).as_deref() != Some(space) {
+                        let _ = db::set_meta(&self.db(), &space_key(id), space);
+                    }
+                }
             } else if t.recovered() {
                 if !auto {
                     continue;
@@ -255,6 +262,120 @@ impl Hangar {
         }
         let o = run(bin, &["send", &t.addr, &line], Duration::from_secs(90));
         if o.ok { Ok(()) } else { Err(o.err.trim().to_string()) }
+    }
+
+    /// herdr is an opener: the integration is on and hc answers. What hc said is kept a few seconds: every Resume and
+    /// openers listing asks, and a hung hc would hold each of them for HC_WAIT.
+    pub(crate) fn herdr_available(&self) -> bool {
+        static SEEN: Mutex<Option<(std::time::Instant, String, bool)>> = Mutex::new(None);
+        let Some(bin) = self.hc() else { return false };
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, b, ok)) = seen.as_ref() {
+            if *b == bin && at.elapsed() < Duration::from_secs(10) {
+                return *ok;
+            }
+        }
+        let ok = json_of(&bin, &["ls", "--json"]).is_some();
+        *seen = Some((std::time::Instant::now(), bin, ok));
+        ok
+    }
+
+    /// herdr's window app: HANGAR_HERDR_APP (empty: none), else where it installs itself, else the PATH.
+    fn herdr_app(&self) -> Option<String> {
+        if let Some(v) = std::env::var_os("HANGAR_HERDR_APP") {
+            return Some(v.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+        }
+        if !self.discover {
+            return None;
+        }
+        let exe = if cfg!(windows) { "herdr-app.exe" } else { "herdr-app" };
+        let installed = crate::home().join(".local/bin").join(exe);
+        Some(if installed.exists() { installed.to_string_lossy().into_owned() } else { exe.into() })
+    }
+
+    /// The executable whose icon herdr shows (a scoop shim points at it in its .shim file).
+    #[cfg(windows)]
+    pub(crate) fn herdr_app_icon(&self) -> String {
+        let Some(bin) = self.herdr_app() else { return String::new() };
+        let found = if std::path::Path::new(&bin).is_absolute() {
+            Some(std::path::PathBuf::from(&bin))
+        } else {
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join(&bin)).find(|p| p.is_file())
+        };
+        let Some(exe) = found else { return String::new() };
+        let shim = std::fs::read_to_string(exe.with_extension("shim")).ok();
+        let target = shim.as_deref().and_then(|s| s.lines().find_map(|l| l.trim().strip_prefix("path")?.trim().strip_prefix('=')))
+            .map(|p| p.trim().trim_matches('"').to_string());
+        target.unwrap_or_else(|| exe.to_string_lossy().into_owned())
+    }
+
+    /// Brings herdr's window forward (macOS: the app, by bundle).
+    fn herdr_front(&self) {
+        #[cfg(target_os = "macos")]
+        if self.discover {
+            let _ = proc::run(&crate::platform::macos::open_bin(), &["-b", "dev.herdr.app"], HC_WAIT);
+        }
+    }
+
+    /// A new herdr tab for session `session` running `argv` in `cwd`: through the window app, else as a kept terminal
+    /// of hc's own.
+    pub(crate) fn herdr_open(&self, session: &str, cwd: &str, argv: &[String]) -> Result<(), String> {
+        if let Some(app) = self.herdr_app() {
+            // A tab opens in the space shown, which may be another machine's: the tab goes to one of this machine's
+            // spaces. The space the session last ran in, if it's still there; else the one with a terminal in the
+            // session's folder (or the deepest folder holding it), since a space's own folder doesn't say where its
+            // terminals are; else the one shown, else the first; with none, a space of its own here (machine "" is
+            // this computer).
+            let json_argv = Value::from(argv.to_vec()).to_string();
+            let spaces = serde_json::from_str::<Value>(&run(&app, &["ls"], HC_WAIT).out).unwrap_or(Value::Null);
+            let local: Vec<&Value> = spaces["spaces"].as_array().into_iter().flatten().filter(|s| s["machine"].is_null()).collect();
+            let cwds: HashMap<String, String> = self.hc().and_then(|b| json_of(&b, &["ls", "--json"])).and_then(|v| {
+                Some(v["terminals"].as_array()?.iter().filter_map(|t| Some((t["address"].as_str()?.to_string(), t["cwd"].as_str()?.to_string()))).collect())
+            }).unwrap_or_default();
+            let depth = |s: &&Value| {
+                let terms = s["tabs"].as_array().into_iter().flatten().flat_map(|t| t["terminals"].as_array().into_iter().flatten());
+                terms.filter_map(|t| cwds.get(t["terminal"].as_str()?)).filter(|c| Path::new(cwd).starts_with(c.as_str())).map(|c| c.len()).max()
+            };
+            let last = self.herdr_meta(&space_key(session));
+            let space = local.iter().find(|s| last.is_some() && s["id"].as_str() == last.as_deref()).copied()
+                .or_else(|| local.iter().filter_map(|s| Some((depth(s)?, s["active"] == true, *s))).max_by_key(|(n, active, _)| (*n, *active)).map(|(.., s)| s))
+                .or_else(|| local.iter().find(|s| s["active"] == true).copied())
+                .or_else(|| local.first().copied())
+                .and_then(|s| s["id"].as_str());
+            let o = match space {
+                Some(id) => run(&app, &["do", "tab.new", "--space", id, "--folder", cwd, "--argv", &json_argv], HC_WAIT),
+                None => run(&app, &["do", "space.new", "--machine", "", "--folder", cwd, "--argv", &json_argv], HC_WAIT),
+            };
+            if o.ok {
+                self.herdr_front();
+                return Ok(());
+            }
+            if !o.missing {
+                return Err(herdr_app_error(&o));
+            }
+        }
+        let bin = self.hc().ok_or("no_hc")?;
+        let mut args = vec!["run", "--bg", "--keep", "--no-parent", "--cwd", cwd, "--"];
+        args.extend(argv.iter().map(String::as_str));
+        let o = run(&bin, &args, HC_WAIT);
+        if o.ok { Ok(()) } else { Err(o.err.trim().to_string()) }
+    }
+
+    /// The herdr terminal session `id` is running in, shown; None when it runs in none.
+    pub(crate) fn herdr_focus(&self, id: &str) -> Option<ApiResult> {
+        let bin = self.hc()?;
+        let t = terminals(&bin)?.into_iter().find(|t| t.noted_session() == Some(id) && t.label(PID) == Some(&t.pid.to_string()))?;
+        let app = self.herdr_app()?;
+        let o = run(&app, &["do", "agent.focus", "--terminal", &t.addr], HC_WAIT);
+        // Without the window app there's no window to show it in.
+        if o.missing {
+            return None;
+        }
+        if !o.ok {
+            return Some(Err(ApiError(500, herdr_app_error(&o))));
+        }
+        self.herdr_front();
+        Some(Ok(json!({ "focused": t.addr })))
     }
 
     /// The recovered terminal noted for session `id`, restored; None when there is none.
