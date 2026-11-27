@@ -191,7 +191,7 @@ const shellOf = () => DARWIN ? "zsh" : "powershell";
 
 // herdr opens a tab in the space shown, which may be another machine's (a Windows one, given a macOS folder): the
 // tab goes to one of this machine's spaces.
-const work = (p) => DARWIN ? `/work/${p}` : String.raw`C:\work\${p}`;
+const work = (p) => DARWIN ? `/work/${p}` : `C:\\work\\${p}`;
 // Spaces as herdr-app lists them ({ id, folder, machine, active, terminals: [{ address, cwd }] }), their terminals'
 // folders as hc lists them. A space's own folder says nothing of where its terminals are.
 const spaces = (list) => {
