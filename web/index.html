@@ -206,7 +206,9 @@ td.n { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
 .accts input[type=number] { width: 64px; font: 12px var(--sans); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
 .accts .keep { font-size: 12px; color: var(--muted); }
+.accts .hook { display: flex; align-items: center; gap: 4px; margin-top: 2px; }
 .transfer { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; margin: 6px 0; }
+.transfer input[type=text] { font: 12px var(--sans); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; min-width: 260px; }
 .transfer select { font: 12px var(--sans); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
 .accts { display: flex; flex-direction: column; gap: 8px; }
 .accts .a { display: grid; grid-template-columns: 28px minmax(0, 160px) 1fr auto; gap: 8px; align-items: center; font-size: 12px; }
@@ -1057,11 +1059,20 @@ function accountsPanel() {
       mutate(() => Object.assign(a, { cleanupDays: v ?? 30, cleanupSet: v !== null }),
         () => api("PATCH", "/api/account", { dir: a.dir, cleanupDays: v }), { rerender: false });
     };
+    // The SessionStart hook notes sessions on herdr terminals: offered with the herdr integration on.
+    let hook = null;
+    if (herdr?.enabled) {
+      const box = el("input", { type: "checkbox", "aria-label": t("acctHook") });
+      box.checked = a.sessionStartHook;
+      box.onchange = () => mutate(() => Object.assign(a, { sessionStartHook: box.checked }),
+        () => api("PATCH", "/api/account", { dir: a.dir, sessionStartHook: box.checked }), { rerender: false });
+      hook = el("label", { class: "keep hook" }, [box, " " + t("acctHook")]);
+    }
     const toggle = a.hidden ? actBtn(t("show"), "", () => api("PATCH", "/api/account", { dir: a.dir, hidden: false }))
       : actBtn(a.added ? t("remove") : t("hide"), "", () => api("DELETE", "/api/account", { dir: a.dir }));
     return el("div", { class: "a" + (a.hidden ? " off" : "") }, [color, name,
       el("div", {}, [el("div", { class: "dir", text: a.dir }), el("div", { class: "meta", text: a.hidden ? t("hiddenL") : t("acctCounts", stats(a.dir)) }),
-        el("label", { class: "keep" }, [t("keepFor") + " ", keep, " " + t("keepUnit")])]), toggle]);
+        el("label", { class: "keep" }, [t("keepFor") + " ", keep, " " + t("keepUnit")]), hook]), toggle]);
   });
   const input = el("input", { type: "text", placeholder: t("addFolderPlaceholder"), "aria-label": t("addFolder") });
   const submit = el("button", { class: "btn", type: "submit", text: t("addFolder") });
@@ -1137,8 +1148,9 @@ function openersSettings() {
 // herdr: the integration on or off, restoring on its own or only when asked, and the hc to call.
 function herdrSettings() {
   if (!herdr) return null;
-  // herdr on or off adds or takes away its openers.
-  const save = (patch, control) => act(() => api("PATCH", "/api/herdr", patch).then(() => Promise.all([loadHerdr(), loadOpeners()])), null, control);
+  // herdr on or off adds or takes away its openers and the accounts' SessionStart hooks (off removes them).
+  const save = (patch, control) => act(() => api("PATCH", "/api/herdr", patch).then(() => Promise.all([loadHerdr(), loadOpeners(),
+    api("GET", "/api/accounts").then((a) => { accounts = a; })])), null, control);
   const on = el("input", { type: "checkbox", id: "herdrOn" });
   on.checked = herdr.enabled;
   on.onchange = () => save({ enabled: on.checked }, on);
@@ -1149,14 +1161,12 @@ function herdrSettings() {
   const path = el("input", { type: "text", id: "herdrPath", placeholder: t("herdrPathAuto"), "aria-label": t("herdrPath") });
   path.value = herdr.hcPath;
   path.onchange = () => save({ hcPath: path.value }, path);
-  const hook = el("input", { type: "checkbox", disabled: "" });
   return panel(t("pHerdr"), t("pHerdrSub"), [
     el("label", { class: "btn" }, [on, " " + t("herdrOn")]),
     el("label", { class: "transfer" }, [t("herdrAfter") + " ", auto]),
     el("label", { class: "transfer" }, [t("herdrPath") + " ", path]),
     herdr.enabled ? el("div", { id: "herdrHc", class: herdr.available ? "meta" : "meta warn",
       text: t(herdr.available ? "herdrFound" : "herdrMissing", { path: herdr.hc || "hc" }) }) : null,
-    el("label", { class: "btn", "aria-disabled": "true" }, [hook, " " + t("herdrHook") + " (" + t("soon") + ")"]),
   ]);
 }
 

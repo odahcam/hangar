@@ -10,6 +10,7 @@ pub mod cli;
 pub mod cloud;
 mod db;
 mod herdr;
+pub mod hook;
 mod insights;
 mod open;
 pub mod platform;
