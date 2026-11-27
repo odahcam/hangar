@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const SESSION: &str = "hangar.session";
-const PID: &str = "hangar.pid";
+pub(crate) const SESSION: &str = "hangar.session";
+pub(crate) const PID: &str = "hangar.pid";
 const TICK: Duration = Duration::from_secs(15);
 const HC_WAIT: Duration = Duration::from_secs(10);
 const ON: &str = "herdr_on";
@@ -50,7 +50,7 @@ impl Term {
 
 /// hc to call: HANGAR_HC (empty: off), else the path set in Settings, else where hc installs itself (a GUI app's PATH
 /// doesn't reach ~/.local/bin), else the PATH. A test world (no discovery) leaves the user's hc alone unless one is named.
-fn hc(discover: bool, custom: Option<String>) -> Option<String> {
+pub(crate) fn hc(discover: bool, custom: Option<String>) -> Option<String> {
     if let Some(v) = std::env::var_os("HANGAR_HC") {
         return Some(v.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
     }
@@ -66,7 +66,7 @@ fn hc(discover: bool, custom: Option<String>) -> Option<String> {
 
 /// hc as the user, not as the terminal Hangar may have been started from: with that terminal's identity, `send` wraps
 /// the text in an <hc from=…> tag (which the shell can't parse) and listings follow its scope.
-fn run(bin: &str, args: &[&str], timeout: Duration) -> proc::Output {
+pub(crate) fn run(bin: &str, args: &[&str], timeout: Duration) -> proc::Output {
     let mut c = proc::command(bin);
     for k in ["HC_TERMINAL_ID", "HC_SCOPE", "HC_TERMINAL_SOCKET"] {
         c.env_remove(k);
@@ -83,7 +83,7 @@ fn json_of(bin: &str, args: &[&str]) -> Option<Value> {
 }
 
 /// One live terminal, as hc sees it now.
-fn term(bin: &str, addr: &str) -> Option<Term> {
+pub(crate) fn term(bin: &str, addr: &str) -> Option<Term> {
     let g = json_of(bin, &["get", addr, "--json"]).filter(|g| g["state"] == "live")?;
     let labels = g["labels"].as_object().map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
     Some(Term {
@@ -158,8 +158,12 @@ impl Hangar {
     fn herdr_meta(&self, k: &str) -> Option<String> {
         db::get_meta(&self.db(), k).ok().flatten()
     }
-    fn herdr_on(&self) -> bool {
+    pub(crate) fn herdr_on(&self) -> bool {
         self.herdr_meta(ON).as_deref() != Some("0")
+    }
+    /// The hc path set in Settings, if any.
+    pub(crate) fn herdr_hc_path(&self) -> Option<String> {
+        self.herdr_meta(HC_PATH).filter(|p| !p.is_empty())
     }
     fn herdr_auto(&self) -> bool {
         self.herdr_meta(AUTO).as_deref() != Some("0")
@@ -416,10 +420,23 @@ impl Hangar {
                 }
             }
         }
-        // Off drops the notes now, not on the next tick (the lock above is released first: hc_bin reads meta).
+        // Off drops the notes now, not on the next tick (the lock above is released first: hc_bin reads meta), and the
+        // SessionStart hooks that would write them again.
         if on == Some("0") {
             FORGOTTEN.store(true, Ordering::SeqCst);
             self.herdr_forget();
+        }
+        let hooked = || self.accounts_in(&self.db()).unwrap_or_default().into_iter().filter(|a| crate::hook::installed(&a.dir));
+        if on == Some("0") {
+            for a in hooked() {
+                crate::hook::set(&a.dir, false, None)?;
+            }
+        } else if body["hcPath"].is_string() {
+            // The hooks call the hc set here.
+            let hc = self.herdr_hc_path();
+            for a in hooked() {
+                crate::hook::set(&a.dir, true, hc.as_deref())?;
+            }
         }
         Ok(json!({ "ok": true }))
     }

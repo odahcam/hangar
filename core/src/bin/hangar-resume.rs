@@ -1,17 +1,24 @@
 // hangar-resume <session id> [--config <account folder>]: run by a terminal tab in the session's folder, resumes the
 // session under its account (see core/src/resume.rs). On Unix it becomes claude; on Windows it waits for claude in
 // the same console and hands back its exit code.
+// hangar-resume --session-start [--hc <path>]: run by an account's SessionStart hook (see core/src/hook.rs).
 use hangar_core::resume;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let (mut id, mut config) = (None, None);
+    let (mut id, mut config, mut hook, mut hc) = (None, None, false, None);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--config" => config = Some(args.next().unwrap_or_else(|| usage())),
+            "--session-start" => hook = true,
+            "--hc" => hc = Some(args.next().unwrap_or_default()),
             _ if id.is_none() => id = Some(a),
             _ => usage(),
         }
+    }
+    if hook {
+        hangar_core::hook::session_start(hc.filter(|p| !p.is_empty()));
+        return;
     }
     let id = id.filter(|i| resume::valid_id(i)).unwrap_or_else(|| usage());
     let mut c = resume::claude_command(&id, config.as_deref()).unwrap_or_else(|e| fail(&e));

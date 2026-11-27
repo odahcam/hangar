@@ -42,24 +42,45 @@ pub(crate) fn cleanup_days(dir: &Path) -> Option<u64> {
     serde_json::from_str::<Value>(&text).ok()?["cleanupPeriodDays"].as_u64()
 }
 
-/// Sets cleanupPeriodDays (None removes it, back to Claude Code's default), keeping every other setting as it was.
-/// An unreadable settings.json is left alone rather than replaced.
+/// Sets cleanupPeriodDays (None removes it, back to Claude Code's default).
 fn set_cleanup_days(dir: &Path, days: Option<u64>) -> ApiResult<()> {
+    edit_settings(dir, |obj| {
+        match days {
+            Some(d) => obj.insert("cleanupPeriodDays".into(), json!(d)),
+            None => obj.remove("cleanupPeriodDays"),
+        };
+    })
+}
+
+/// Changes the account's settings.json through `f`, keeping every other setting as it was. An unreadable settings.json
+/// is left alone rather than replaced.
+pub(crate) fn edit_settings(dir: &Path, f: impl FnOnce(&mut serde_json::Map<String, Value>)) -> ApiResult<()> {
     let path = dir.join("settings.json");
     let mut settings = match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<Value>(&text).ok().filter(Value::is_object).ok_or_else(|| ApiError(409, "settings_unreadable".into()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
         Err(e) => return Err(ApiError(500, e.to_string())),
     };
-    let obj = settings.as_object_mut().unwrap();
-    match days {
-        Some(d) => obj.insert("cleanupPeriodDays".into(), json!(d)),
-        None => obj.remove("cleanupPeriodDays"),
-    };
-    // Written beside it and renamed over it, so Claude Code never reads half a file.
-    let tmp = dir.join("settings.json.hangar-tmp");
+    f(settings.as_object_mut().unwrap());
     let io = |e: std::io::Error| ApiError(500, e.to_string());
-    fs::write(&tmp, serde_json::to_string_pretty(&settings).unwrap() + "\n").map_err(io)?;
+    // A symlinked settings.json (dotfiles) stays a link: the file it points to is the one replaced.
+    let path = fs::canonicalize(&path).unwrap_or(path);
+    // Written beside it and renamed over it, so Claude Code never reads half a file.
+    let tmp = path.with_file_name("settings.json.hangar-tmp");
+    let text = serde_json::to_string_pretty(&settings).unwrap() + "\n";
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // The file keeps its mode (it may hold tokens in env); a new one is the owner's alone.
+        let mode = fs::metadata(&path).map(|m| m.permissions().mode() & 0o7777).unwrap_or(0o600);
+        let _ = fs::remove_file(&tmp);
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).map_err(io)?;
+        file.write_all(text.as_bytes()).map_err(io)?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)).map_err(io)?;
+    }
+    #[cfg(not(unix))]
+    fs::write(&tmp, text).map_err(io)?;
     fs::rename(&tmp, &path).map_err(io)
 }
 
@@ -134,7 +155,8 @@ impl Hangar {
             .map(|a| {
                 let cleanup = cleanup_days(&a.dir);
                 json!({ "dir": a.key, "name": a.name, "color": a.color, "default": is_default(&a.dir), "added": a.added, "hidden": a.hidden,
-                    "cleanupDays": cleanup.unwrap_or(DEFAULT_CLEANUP_DAYS), "cleanupSet": cleanup.is_some() })
+                    "cleanupDays": cleanup.unwrap_or(DEFAULT_CLEANUP_DAYS), "cleanupSet": cleanup.is_some(),
+                    "sessionStartHook": crate::hook::installed(&a.dir) })
             })
             .collect())
     }
@@ -169,6 +191,8 @@ impl Hangar {
     }
 
     pub(crate) fn update_account(&self, body: &Value) -> ApiResult {
+        // Read before the lock below: they take it too.
+        let (herdr_on, hc_path) = (self.herdr_on(), self.herdr_hc_path());
         let db = self.db();
         let mut row = self.account_row(&db, body)?;
         if let Some(name) = body["name"].as_str() {
@@ -190,6 +214,18 @@ impl Hangar {
                 d => Some(d.as_u64().filter(|d| *d >= 1).ok_or_else(|| ApiError(400, "cleanup_days".into()))?),
             };
             set_cleanup_days(Path::new(&row.dir), days)?;
+        }
+        // The SessionStart hook lives in the account's settings.json too; it notes sessions on herdr terminals, so it
+        // goes in only with the herdr integration on.
+        match &body["sessionStartHook"] {
+            Value::Null => {}
+            Value::Bool(on) => {
+                if *on && !herdr_on {
+                    return Err(ApiError(409, "herdr_off".into()));
+                }
+                crate::hook::set(Path::new(&row.dir), *on, hc_path.as_deref())?;
+            }
+            _ => return Err(ApiError(400, "sessionStartHook".into())),
         }
         db::put_account(&db, &row)?;
         Ok(json!({ "ok": true }))
